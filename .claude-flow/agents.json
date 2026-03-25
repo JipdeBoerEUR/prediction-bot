@@ -1,0 +1,17 @@
+{
+  "agents": {
+    "hive-worker-1774268485565-lfaa": {
+      "agentId": "hive-worker-1774268485565-lfaa",
+      "agentType": "worker",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "role": "worker",
+        "hiveRole": "worker"
+      },
+      "createdAt": "2026-03-23T12:21:25.565Z",
+      "domain": "hive-mind"
+    }
+  }
+}

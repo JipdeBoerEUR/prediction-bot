@@ -1,0 +1,26 @@
+# Virtual Environments
+venv/
+.env/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Local Databases & Models
+chroma_db/
+models/
+*.sqlite3
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Jupyter/Testing
+.ipynb_checkpoints/
+.pytest_cache/

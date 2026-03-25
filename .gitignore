@@ -1,0 +1,20 @@
+node_modules/
+filing_db/
+venv/
+.venv/
+__pycache__/
+.hive-mind/
+*.csv
+*.pt
+*.pth
+*.joblib
+.env
+*.parquet
+
+# Local state — never overwrite on Home PC during git pull
+portfolio.json
+trade_history.csv
+statarb/config.py
+stop.txt
+data/
+logs/
