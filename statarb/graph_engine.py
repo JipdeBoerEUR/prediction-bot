@@ -165,6 +165,13 @@ def _alpaca_fetch_close_prices(
     from alpaca.data.historical.stock import StockHistoricalDataClient  # type: ignore
     from alpaca.data.requests import StockBarsRequest  # type: ignore
 
+    # Always reload .env so stale Windows/PowerShell session env vars never win.
+    try:
+        from dotenv import load_dotenv as _load_dotenv
+        _load_dotenv(override=True)
+    except ImportError:
+        pass
+
     # Support both env vars and config.py constants (useful for local demo setups).
     cfg_key_id = None
     cfg_secret = None

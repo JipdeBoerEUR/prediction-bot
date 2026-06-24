@@ -1,54 +1,238 @@
-# Prediction Bot: The Unified Trading Intelligence 🤖📈
+# Prediction Bot — Topical Trading Engine
 
-A high-performance algorithmic trading system that fuses **Insider Intelligence**, **Topological Market Analysis**, and **Deep Learning** to execute high-conviction trades with institutional-grade risk management.
+> **An end-to-end autonomous trading system combining statistical arbitrage with NLP-driven narrative momentum.** Built as a portfolio project for quantitative finance applications.
 
----
-
-## 🏛️ System Architecture
-
-The bot is structured as a **Unified Trading Daemon**, coordinating multiple intelligence layers before any capital is at risk.
-
-### 1. The Gatekeepers (Risk & Regime)
-- **Topological Regime Engine (`statarb/regime_engine.py`)**: Uses Persistent Homology (TDA) to detect market stress. If correlations collapse (indicating panic), the bot stops all new entries.
-- **Sector Shield**: A dynamic exposure manager that prevents the bot from over-concentrating in any single industry (built into `main.py`).
-- **Earnings Blackout**: Automatically vetoes trades within 7 days of an earnings release to avoid "gap" volatility.
-- **Technical Eyes**: A 200-day SMA trend filter to ensure the bot isn't "catching a falling knife."
-
-### 2. The Intelligence Layers (AI & NLP)
-- **FinBERT Sentiment 🧠**: Uses a Transformer-based model optimized for finance to analyze the "tone" of recent news headlines.
-- **SEC Auditor 📄**: Deep-scans 10-K and 10-Q filings for specific risk-factor keywords and sentiment shifts.
-- **Earnings Analyst 🎙️**: Evaluates the specific language used by management during the most recent earnings calls.
-- **LSTM Price Predictor 📈**: A Recurrent Neural Network that forecasts short-term (5-day) price movement based on recent OHLCV data.
-- **Trade Learner 🎓**: A RandomForest model that looks at your own `trade_history.csv` to learn which insider-buy patterns actually result in winners, dynamically adjusting your Kelly Fraction.
-
-### 3. The Execution Engine (Quant)
-- **Insider Listener (`sec_listener.py`)**: Real-time monitoring of Open Market Purchases (Form 4).
-- **Scoring Engine**: Weighs the "Conviction Score" based on the executive's role (CEO > 10% Owner).
-- **Fractional Kelly Brakes (`kelly_size.py`)**: Mathematically optimizes position sizing to prevent ruin, capped at 5% of your total account.
-- **Alpaca Execution**: Secure, automated order entry via the Alpaca Markets API.
+[![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)](https://python.org)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![Alpaca](https://img.shields.io/badge/Broker-Alpaca%20Paper-yellow)](https://alpaca.markets)
 
 ---
 
-## 🚀 Getting Started
+## Overview
 
-If this is your first time setting up the bot, please follow the **[QUICKSTART.md](./QUICKSTART.md)** for a zero-to-hero installation guide.
+This bot runs a dual-source alpha pipeline: one scout discovers **topical momentum** from live financial news using BERTopic + FinBERT, and a second scout identifies **statistical arbitrage** opportunities from mean-reversion signals on correlated equity pairs. Both feeds merge into a unified candidate pool that is filtered through a multi-gate AI audit before execution.
 
-### Core Commands
-- **Run the Unified Daemon**: `python main.py` (Runs scans at 9:00 AM and 3:30 PM daily).
-- **Manual Backtest**: `python advanced_backtest.py` (Simulate the entire AI stack on past data).
-- **Run Tests**: `python -m pytest test_kelly_size.py`
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  OrchestratorContext                │
+│          (macro regime + market session)             │
+└────────────────┬──────────────┬──────────────────────┘
+                 │              │
+    ┌────────────▼───┐  ┌───────▼──────────┐
+    │  Scout A       │  │  Scout B         │
+    │  Topic Engine  │  │  StatArb Engine  │
+    │  (BERTopic +   │  │  (Graph-based    │
+    │   FinBERT NLP) │  │   cointegration) │
+    └────────────┬───┘  └───────┬──────────┘
+                 └──────┬───────┘
+              ┌─────────▼──────────┐
+              │  UnifiedCandidate  │
+              │  Pool (deduped)    │
+              └─────────┬──────────┘
+                        │
+              ┌─────────▼──────────────────────────────┐
+              │  Multi-Gate AI Audit                   │
+              │  Gate 1: Sentiment pre-filter           │
+              │  Gate 2: FinBERT re-score               │
+              │  Gate 3: LSTM directional forecast      │
+              │  Gate 4: RAG risk report (Gemini)       │
+              └─────────┬──────────────────────────────┘
+                        │
+              ┌─────────▼──────────┐
+              │  Kelly Sizing +    │
+              │  Risk Manager      │
+              │  (VIX gating,      │
+              │   regime filter)   │
+              └─────────┬──────────┘
+                        │
+              ┌─────────▼──────────┐
+              │  Alpaca Execution  │
+              │  (Paper / Live)    │
+              └────────────────────┘
+```
 
 ---
 
-## 💡 Philosophy
-Most retail bots trade on "lagging" indicators (RSIs, MACDs). This bot trades on **Leading Indicators**: 
-1. **Insider Motivation**: Why is the CEO buying?
-2. **Market Topology**: Is the market broad or consolidating for a crash?
-3. **AI Interpretation**: What is the subtle "tone" of the news and filings?
+## Key Components
+
+### 1. Topical Trading Engine (`ai/topic_engine.py`)
+- Aggregates headlines from **10 free RSS feeds** (Reuters, Bloomberg, CNBC, FT, WSJ, etc.)
+- Clusters headlines into topics using **BERTopic** (UMAP dimensionality reduction + HDBSCAN clustering)
+- Scores each topic cluster with **FinBERT** (ProsusAI/finbert) for financial sentiment
+- Maps high-momentum topics to S&P 500 tickers via keyword exposure scoring
+- Outputs: `(topic_label, momentum_score, sentiment_score, tickers[])`
+
+### 2. Statistical Arbitrage Engine (`statarb/`)
+- Builds a **correlation graph** across the S&P 500 (~435 tickers)
+- Identifies cointegrated pairs and computes Ornstein–Uhlenbeck residuals
+- **Brain Engine**: Gradient-boosted classifier (`HistGradientBoosting`) trained on historical spread features to predict mean-reversion probability
+- **Regime Engine**: Filters out signals during adverse macro regimes (VIX spikes, bear phases)
+- Parameters optimised with **Optuna** (Bayesian hyperparameter search)
+
+### 3. AI Audit Pipeline (`ai/`)
+| Module | Role |
+|---|---|
+| `sentiment_ai.py` | FinBERT sentiment scoring on live news |
+| `price_predictor.py` | LSTM directional forecast (bullish/bearish) |
+| `sec_analyzer.py` | 10-K/10-Q regulatory risk parsing |
+| `earnings_analyzer.py` | Earnings call transcript tone analysis |
+| `rag_library.py` | Retrieval-augmented risk report via Gemini |
+| `news_scanner.py` | VADER fast pre-filter (< 1ms per ticker) |
+| `trade_learner.py` | Online learning from trade outcomes |
+
+### 4. Risk & Execution
+- **Kelly Criterion** position sizing with drawdown cap
+- **Mean-variance optimisation** for portfolio weights (with covariance regularisation)
+- Macro filter: VIX halt at 40, leverage cut at 25
+- Trailing stop-loss per position
+- Paper trading via **Alpaca Markets API**
 
 ---
 
-## 🔮 Roadmap
-- **Topological Stat-Arb Integration**: Full automated pair-trading based on H1 persistence cycles.
-- **Discord/Telegram Alerts**: Real-time push notifications for every AI evaluation.
-- **Multi-Broker Support**: Integration for Interactive Brokers (IBKR) for lower margin rates.
+## Ticker Universe
+
+Full **S&P 500** (~435 tickers) across all 11 GICS sectors:
+- Information Technology, Communication Services, Consumer Discretionary, Consumer Staples
+- Health Care, Financials, Industrials, Energy, Materials, Real Estate, Utilities
+
+---
+
+## Tech Stack
+
+| Category | Libraries |
+|---|---|
+| NLP / Topic Modelling | BERTopic, sentence-transformers, UMAP, HDBSCAN |
+| Financial NLP | ProsusAI/FinBERT (HuggingFace Transformers) |
+| Deep Learning | PyTorch, Transformers |
+| Classical ML | scikit-learn (HistGradientBoosting), Optuna |
+| Market Data | yfinance, Alpaca Markets API |
+| RAG / LLM | Google Gemini (google-generativeai), ChromaDB |
+| Data | pandas, numpy, scipy |
+| Scheduling | APScheduler |
+| Broker | alpaca-py (paper + live) |
+| Containerisation | Docker |
+
+---
+
+## Setup
+
+### 1. Clone & install
+```bash
+git clone https://github.com/Arrowpowercod/prediction-bot.git
+cd prediction-bot
+pip install -r requirements.txt
+```
+
+### 2. Configure
+```bash
+# Copy the example config
+cp statarb/config.example.py statarb/config.py
+
+# Create your .env (never committed to git)
+cat > .env << EOF
+ALPACA_API_KEY=your_alpaca_key
+ALPACA_SECRET_KEY=your_alpaca_secret
+GOOGLE_API_KEY=your_gemini_key       # optional — for RAG risk reports
+TELEGRAM_BOT_TOKEN=your_bot_token   # optional — for trade alerts
+TELEGRAM_CHAT_ID=your_chat_id       # optional
+EOF
+```
+
+Get a free Alpaca paper trading account at [alpaca.markets](https://alpaca.markets).  
+Get a free Gemini API key at [aistudio.google.com](https://aistudio.google.com).
+
+### 3. Run
+```bash
+# Paper trading (dry run)
+python main.py
+
+# Or via Docker
+docker build -t prediction-bot .
+docker run --env-file .env prediction-bot
+```
+
+### 4. (Optional) Retrain the Brain Model
+After setup, retrain the stat-arb classifier on the full S&P 500 universe:
+```bash
+python statarb/dataset_builder_v2.py
+```
+This downloads ~5 years of hourly OHLCV data and trains the gradient-boosted classifier. Takes 15–30 min on first run; cached thereafter.
+
+---
+
+## Backtesting
+
+```bash
+python backtest.py
+```
+
+The backtester replays historical signals through the full pipeline (regime filter, risk sizing, execution costs) and outputs Sharpe ratio, max drawdown, win rate, and P&L curve.
+
+---
+
+## Strategy Logic
+
+### Topical Momentum Alpha
+1. Every scan cycle, fetch headlines from 10 RSS feeds
+2. Cluster into topics with BERTopic (minimum 3 headlines per cluster)
+3. Score each topic cluster with FinBERT — positive sentiment + high velocity = momentum signal
+4. Map topic to tickers with `>= 0.20` keyword exposure score
+5. Send top tickers through the 4-gate AI audit
+6. Size with Kelly Criterion, execute via Alpaca
+
+### Statistical Arbitrage Alpha
+1. Build correlation graph on S&P 500 (threshold: |ρ| > 0.30)
+2. Compute Ornstein–Uhlenbeck residuals for correlated pairs
+3. Brain Engine predicts mean-reversion probability
+4. Enter when `z-score < -1.74` and `p(reversion) > 0.32`
+5. Exit when `z-score > 0.31` or trailing stop hit
+
+---
+
+## Project Structure
+
+```
+prediction-bot/
+├── main.py                    # Orchestrator — dual-scout pipeline
+├── ai/
+│   ├── news_aggregator.py     # RSS headline fetcher (10 feeds, 15-min cache)
+│   ├── topic_engine.py        # BERTopic + FinBERT topic discovery
+│   ├── topic_exposure.py      # Ticker-to-topic exposure scoring
+│   ├── sentiment_ai.py        # FinBERT news sentiment
+│   ├── price_predictor.py     # LSTM directional forecast
+│   ├── sec_analyzer.py        # SEC filing risk analysis
+│   ├── earnings_analyzer.py   # Earnings transcript analysis
+│   ├── rag_library.py         # RAG risk report (Gemini + ChromaDB)
+│   └── trade_learner.py       # Online learning from outcomes
+├── statarb/
+│   ├── config.example.py      # Configuration template
+│   ├── brain_engine.py        # Gradient-boosted signal classifier
+│   ├── graph_engine.py        # Correlation graph builder
+│   ├── signal_engine.py       # Entry/exit signal generation
+│   ├── regime_engine.py       # Macro regime filter
+│   ├── risk_manager.py        # Position sizing + leverage control
+│   ├── dataset_builder_v2.py  # Historical data + feature pipeline
+│   └── sim_engine.py          # Simulation engine
+├── backtest.py                # Historical simulation + metrics
+├── news_scanner.py            # VADER fast pre-filter
+├── notifier.py                # Telegram / email alerts
+├── macro_filter.py            # VIX + regime gating
+├── kelly_size.py              # Kelly Criterion sizing
+├── logger.py                  # Structured trade logging
+├── Dockerfile                 # Container definition
+└── requirements.txt           # Python dependencies
+```
+
+---
+
+## Disclaimer
+
+This project is for **educational and portfolio demonstration purposes only**. It runs in paper trading mode by default. Past performance of any backtested strategy does not guarantee future results. This is not financial advice.
+
+---
+
+## Author
+
+Built by [@Arrowpowercod](https://github.com/Arrowpowercod) — working student quant finance candidate.

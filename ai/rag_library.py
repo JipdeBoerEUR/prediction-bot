@@ -1,3 +1,4 @@
+import os
 import chromadb
 from sentence_transformers import SentenceTransformer
 from google import genai as google_genai
@@ -135,7 +136,7 @@ def generate_rag_risk_report(ticker: str, ten_k_text: Optional[str] = None) -> s
     Main entry point for the bot pipeline.
     Fails open — returns a safe message string on any error, never crashes the pipeline.
     """
-    GEMINI_KEY = "AIzaSyAqrZt85JOm_2KdN_AQg_KqNN5nfMQJbKs"
+    GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
     
     try:
         library = RagLibrary(gemini_api_key=GEMINI_KEY)
@@ -144,13 +145,51 @@ def generate_rag_risk_report(ticker: str, ten_k_text: Optional[str] = None) -> s
             if ten_k_text and len(ten_k_text.strip()) >= 200:
                 library.add_filing(ticker, ten_k_text)
             else:
-                return "10-K text not available for RAG processing (EDGAR data may be unavailable)."
+                try:
+                    from edgar import set_identity, Company
+                    set_identity(os.getenv("EDGAR_IDENTITY", "bot@example.com"))
+                    _filings = Company(ticker).get_filings(form="10-K")
+                    _filing = _filings.latest(1)
+                    _ten_k = _filing.obj()
+                    try:
+                        fetched_text = _ten_k.doc.text
+                    except AttributeError:
+                        fetched_text = str(_ten_k)
+                    library.add_filing(ticker, fetched_text)
+                except Exception as _edgar_err:
+                    print(f"[RAG-DB] Auto-seed from EDGAR failed for {ticker}: {_edgar_err}")
+                    return "10-K text not available for RAG processing (EDGAR data may be unavailable)."
                 
         return library.query_risks(ticker)
         
     except Exception as e:
         print(f"[RAG-DB] Non-fatal error in RAG pipeline for {ticker}: {e}")
         return f"RAG Risk Analysis unavailable: {e}"
+
+def seed_rag_store(db_path: str = "./chroma_db") -> None:
+    """Fetch the most recent 10-K from EDGAR for every ticker in EQUITIES_TICKERS and seed the RAG vector store."""
+    from edgar import set_identity, Company
+    from statarb.config import EQUITIES_TICKERS
+
+    set_identity(os.getenv("EDGAR_IDENTITY", "bot@example.com"))
+    GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
+    library = RagLibrary(db_path=db_path, gemini_api_key=GEMINI_KEY)
+
+    for ticker in EQUITIES_TICKERS:
+        try:
+            company = Company(ticker)
+            filings = company.get_filings(form="10-K")
+            filing = filings.latest(1)
+            ten_k = filing.obj()
+            try:
+                text = ten_k.doc.text
+            except AttributeError:
+                text = str(ten_k)
+            library.add_filing(ticker, text)
+        except Exception as e:
+            print(f"[RAG-DB] Warning: Could not seed {ticker} from EDGAR: {e}")
+            continue
+
 
 if __name__ == "__main__":
     sample_text = """

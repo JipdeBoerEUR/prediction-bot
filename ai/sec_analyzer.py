@@ -128,10 +128,10 @@ def analyze_sec_filings(ticker: str, max_chunks: int = 15) -> dict:
         }
 
     except ImportError:
-        return {"is_passed": True, "score": 0.0, "reason": "Missing edgartools library."}
+        return {"is_passed": False, "score": 0.0, "reason": "Missing edgartools library (fail-safe — trade blocked)."}
     except Exception as e:
         print(f"[SEC-AI] Error analyzing SEC for {ticker}: {e}")
-        return {"is_passed": True, "score": 0.0, "reason": f"SEC Parsing Error: {e}"}
+        return {"is_passed": False, "score": 0.0, "reason": f"SEC Parsing Error (fail-safe — trade blocked): {e}"}
 
 if __name__ == "__main__":
     # Smoke test on a known ticker

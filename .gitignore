@@ -18,3 +18,12 @@ statarb/config.py
 stop.txt
 data/
 logs/
+
+# Optuna study DB (large binary)
+optuna.db
+
+# Scratch / one-off analysis scripts
+_analyze_trials.py
+_check_best.py
+_check_latest.py
+_extract_phase3_bounds.py

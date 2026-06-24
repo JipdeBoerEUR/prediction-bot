@@ -83,7 +83,7 @@ def analyze_earnings_sentiment(ticker: str) -> dict:
         
     except Exception as e:
         print(f"[EARNINGS-AI] Error parsing earnings for {ticker}: {e}")
-        return {"is_passed": True, "score": 0.0, "reason": f"AI Parsing Error: {e}"}
+        return {"is_passed": False, "score": 0.0, "reason": f"AI Parsing Error (fail-safe — trade blocked): {e}"}
 
 if __name__ == "__main__":
     res = analyze_earnings_sentiment("AAPL")

@@ -47,8 +47,8 @@ def analyze_sentiment(ticker: str, num_headlines: int = 5) -> dict:
         
     except Exception as e:
         print(f"[SENTIMENT] Error analyzing sentiment for {ticker}: {e}")
-        # Fail open: if AI fails, we don't block the trade based on news
-        return {"is_passed": True, "score": 0.0, "reason": f"AI Error: {e}"}
+        # Fail-safe: if AI fails, block the trade rather than proceeding blind
+        return {"is_passed": False, "score": 0.0, "reason": f"AI Error (fail-safe — trade blocked): {e}"}
 
 if __name__ == "__main__":
     # Smoke test

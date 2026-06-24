@@ -54,6 +54,17 @@ class ExecutionEngine:
         except Exception:
             return None
 
+    def get_buying_power(self) -> Optional[float]:
+        """Return available buying power (cash + margin) from Alpaca; None on failure."""
+        try:
+            acct = self.client.get_account()
+            bp = getattr(acct, "buying_power", None)
+            if bp is None:
+                bp = getattr(acct, "cash", None)
+            return float(bp) if bp is not None else None
+        except Exception:
+            return None
+
     def get_positions(self) -> Dict[str, int]:
         """Public helper used by main.py to enforce MAX_POSITIONS and avoid duplicate buys."""
         out: Dict[str, int] = {}

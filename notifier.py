@@ -12,6 +12,11 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "your_email@gmail.com")
 SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "your_app_password")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "your_email@gmail.com")
 
+_EMAIL_CONFIGURED = SENDER_EMAIL != "your_email@gmail.com"
+if not _EMAIL_CONFIGURED:
+    print("[NOTIFIER] Warning: SMTP not configured. Set SENDER_EMAIL, SENDER_PASSWORD, "
+          "and RECEIVER_EMAIL env vars to enable email alerts. Running in print-only mode.")
+
 def send_trade_alert(ticker: str, title: str, value: str, current_price: float, shares: int, allocated: float, take_profit_pct: float, stop_loss_pct: float, rag_report: str = ""):
     
     # Calculate exact Trading 212 bracket prices

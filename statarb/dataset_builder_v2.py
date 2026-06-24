@@ -31,10 +31,10 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-import config as cfg
-import sim_engine as sim
-from graph_engine import MarketGraph
-from regime_engine import RegimeEngine
+from statarb import config as cfg
+from statarb import sim_engine as sim
+from statarb.graph_engine import MarketGraph
+from statarb.regime_engine import RegimeEngine
 
 
 OUT_DIR = Path("data")

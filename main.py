@@ -1,11 +1,12 @@
 # main.py — Unified Multi-Strategy Orchestrator
-# Merges Insider Catalyst pipeline and Topological Stat-Arb into one event loop.
+# Primary: Topical Trading (BERTopic news narrative momentum)
+# Secondary: Topological Stat-Arb (Laplacian diffusion on correlation graph)
 #
 # Flow per scan:
 #   [1] Market Gate   → macro kill-switch + RegimeEngine health >= 0.25
-#   [2] Dual Scouts   → asyncio.gather(insider, statarb) concurrently
+#   [2] Dual Scouts   → asyncio.gather(topic_scout, statarb) concurrently
 #   [3] Normalize     → UnifiedCandidate schema
-#   [4] AI Audit      → FinBERT | SEC | Earnings | LSTM | RAG (concurrent per ticker)
+#   [4] AI Audit      → TopicSentiment | FinBERT | LSTM | RAG (concurrent per ticker)
 #   [5] P_win         → BrainEngine batch predict_proba + TradeLearner multiplier
 #   [6] Risk & Size   → allocate_quantities(mean_variance, equity=$account, high-risk)
 #   [7] Execute       → ExecutionEngine (Alpaca) + notify + log
@@ -25,8 +26,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import schedule
 import yfinance as yf
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval     import IntervalTrigger
+from apscheduler.triggers.cron         import CronTrigger
 
 # ── Statarb module ───────────────────────────────────────────────────────────
 from statarb.regime_engine import RegimeEngine
@@ -45,14 +48,22 @@ from ai.rag_library       import generate_rag_risk_report
 from ai.price_predictor   import predict_price_movement
 from ai.trade_learner     import TradeLearner
 
+# ── Topical Trading modules (new primary scout) ───────────────────────────────
+from ai.news_aggregator  import aggregate_headlines, get_ticker_headlines
+from ai.topic_engine     import TopicEngine, TopicCandidate
+from ai.topic_exposure   import build_exposure_map
+
 # ── Root modules ─────────────────────────────────────────────────────────────
-from sec_listener       import listen_for_insider_buys_async
-from fundamental_engine import fetch_fundamentals_data
-from scoring_engine     import ScoringEngine
 from macro_filter       import is_market_crashing
+from news_scanner       import scan_news
 from notifier           import send_trade_alert, send_statarb_alert
 from logger             import log_evaluation
 from portfolio_monitor  import evaluate_portfolio
+
+# Retired → kept on disk for reference:
+#   sec_listener.py       → superseded by TopicEngine (topical trading primary scout)
+#   fundamental_engine.py → still available but not required by topic candidates
+#   scoring_engine.py     → insider conviction scoring (retired from primary flow)
 
 # Retired — kept on disk for reference:
 #   kelly_size.py   → superseded by statarb/risk_manager.allocate_quantities
@@ -67,7 +78,8 @@ _MIN_PWIN        = 0.55
 _REGIME_MIN      = cfg.REGIME_MIN_HEALTH   # 0.25
 _ENTRY_Z         = cfg.ENGINES["equities"].get("entry_z", cfg.ENTRY_Z)
 _MODEL_PATH      = cfg.ENGINES["equities"]["model_path"]
-_MIN_QTY         = 0.001 if getattr(cfg, "FORCE_FRACTIONAL_SHARES", True) else 1
+_MIN_QTY             = 0.001 if getattr(cfg, "FORCE_FRACTIONAL_SHARES", True) else 1
+_MAX_POSITIONS_PER_SCAN = 5       # hard cap on new positions opened in a single scan
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -81,8 +93,10 @@ class OrchestratorContext:
     brain_engine:   BrainEngine
     trade_learner:  TradeLearner
     market_graph:   MarketGraph
-    account_equity: float = 1000.0
-    health_score:   float = float("nan")
+    account_equity:      float = 1000.0
+    health_score:        float = float("nan")
+    allocated_this_scan: float = 0.0   # cumulative notional committed in current scan
+    positions_this_scan: int   = 0     # new positions opened in current scan
 
 
 def initialize_components() -> OrchestratorContext:
@@ -165,9 +179,9 @@ def check_market_health(ctx: OrchestratorContext) -> bool:
         if (not hasattr(ctx.market_graph, "returns_")
                 or ctx.market_graph.returns_ is None
                 or ctx.market_graph.returns_.empty):
-            print("[GATE-2] No MarketGraph returns available. Proceeding (fail-open).")
+            print("[GATE-2] No MarketGraph returns available. Blocking scan (fail-safe).")
             ctx.health_score = float("nan")
-            return True
+            return False
 
         corr_matrix = ctx.market_graph.returns_.tail(22).corr().values
         health = float(ctx.regime_engine.compute_regime(corr_matrix))
@@ -179,84 +193,125 @@ def check_market_health(ctx: OrchestratorContext) -> bool:
             print(f"[GATE-2] REGIME BLOCK — health {health:.4f} < {_REGIME_MIN}. Aborting scan.")
             return False
     except Exception as e:
-        print(f"[GATE-2] Regime check error ({e}). Proceeding (fail-open).")
+        print(f"[GATE-2] Regime check error ({e}). Blocking scan (fail-safe).")
         ctx.health_score = float("nan")
+        return False
 
     return True
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Layer 2 — Dual Scouts
-# ═══════════════════════════════════════════════════════════════════════════════
+# \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+# Module-level TopicEngine singleton (persists across scans)
+_topic_engine_singleton: Optional[TopicEngine] = None
+_prior_headlines: List[str] = []
 
-async def scout_insider_candidates() -> List[dict]:
-    """
-    Engine A — OpenInsider → fetch_fundamentals → ScoringEngine pre-filter.
-    Returns only candidates where ScoringEngine.signal == 'TRADE'.
-    """
-    loop     = asyncio.get_running_loop()
-    raw_buys = await listen_for_insider_buys_async()
 
-    if not raw_buys:
+def _get_topic_engine() -> TopicEngine:
+    global _topic_engine_singleton
+    if _topic_engine_singleton is None:
+        tc = cfg.TOPICAL_TRADING
+        _topic_engine_singleton = TopicEngine(
+            min_cluster_size=tc.get("bertopic_min_cluster", 3),
+            max_topics=tc.get("max_topics_per_scan", 8),
+            lookback_hours=tc.get("topic_lookback_hours", 6),
+            prior_headlines=_prior_headlines,
+        )
+    return _topic_engine_singleton
+
+
+# \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+# Layer 2 \u2014 Dual Scouts
+# \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+
+async def scout_topic_candidates(ctx: OrchestratorContext) -> List[dict]:
+    """Engine A (PRIMARY) \u2014 BERTopic news topic discovery."""
+    global _prior_headlines
+
+    loop    = asyncio.get_running_loop()
+    tcfg    = cfg.TOPICAL_TRADING
+    tickers = cfg.ENGINES["equities"]["tickers"]
+
+    print("\n[SCOUT-A] Topical Trading Scout \u2014 aggregating headlines\u2026")
+
+    try:
+        headlines = await loop.run_in_executor(
+            _executor,
+            lambda: aggregate_headlines(lookback_hours=tcfg.get("topic_lookback_hours", 6)),
+        )
+    except Exception as e:
+        print(f"[SCOUT-A] Headline aggregation failed: {e}")
         return []
 
-    # Deduplicate tickers (keep first occurrence)
-    seen: set  = set()
-    unique: list = []
-    for b in raw_buys:
-        if b["ticker"] not in seen:
-            seen.add(b["ticker"])
-            unique.append(b)
+    if not headlines:
+        print("[SCOUT-A] No headlines fetched.")
+        return []
 
-    print(f"[SCOUT-A] {len(unique)} unique insider buys. Running fundamentals + scoring…")
+    print(f"[SCOUT-A] {len(headlines)} headlines. Running BERTopic\u2026")
 
-    async def _eval_one(trade: dict) -> Optional[dict]:
-        ticker    = trade["ticker"]
-        title     = trade["title"]
-        value     = trade.get("value", "0")
-        value_str = value.replace("$", "").replace("+", "").replace(",", "").strip()
+    engine = _get_topic_engine()
+    engine.prior_headlines = _prior_headlines
+
+    try:
+        topics = await loop.run_in_executor(
+            _executor, lambda: engine.discover_topics(headlines, use_bertopic=True)
+        )
+    except Exception as e:
+        print(f"[SCOUT-A] BERTopic failed ({e}). Trying keyword fallback\u2026")
         try:
-            value_float = float(value_str)
-        except ValueError:
-            value_float = 0.0
+            topics = await loop.run_in_executor(
+                _executor, lambda: engine.discover_topics(headlines, use_bertopic=False)
+            )
+        except Exception as e2:
+            print(f"[SCOUT-A] Fallback failed ({e2}). Returning empty.")
+            _prior_headlines = [h["title"] for h in headlines]
+            return []
 
-        # Map insider role from title
-        mapped_role = "Unknown"
-        if   re.search(r"\bCEO\b",      title): mapped_role = "CEO"
-        elif re.search(r"\bCFO\b",      title): mapped_role = "CFO"
-        elif re.search(r"\bCOB\b",      title): mapped_role = "COB"
-        elif re.search(r"\bDir(ector)?\b", title, re.I): mapped_role = "Director"
-        elif "10%" in title:                    mapped_role = "10% Owner"
+    if not topics:
+        print("[SCOUT-A] No topics discovered.")
+        _prior_headlines = [h["title"] for h in headlines]
+        return []
 
-        insider_data = [{"role": mapped_role, "value": value_float, "type": "P"}]
+    print(f"[SCOUT-A] {len(topics)} topics discovered. Mapping to tickers\u2026")
 
-        fund_data = await loop.run_in_executor(_executor, fetch_fundamentals_data, ticker)
-        if not fund_data:
-            return None
-        fundamentals, valuation = fund_data
+    try:
+        topic_candidates = await loop.run_in_executor(
+            _executor,
+            lambda: engine.score_topic_candidates(
+                topics, tickers,
+                min_topic_momentum    = tcfg.get("min_topic_momentum", 0.30),
+                min_topic_sentiment   = tcfg.get("min_topic_sentiment", 0.05),
+                min_exposure_score    = tcfg.get("min_exposure_score", 0.15),
+                max_tickers_per_topic = tcfg.get("max_tickers_per_topic", 3),
+            ),
+        )
+    except Exception as e:
+        print(f"[SCOUT-A] Ticker mapping failed: {e}")
+        _prior_headlines = [h["title"] for h in headlines]
+        return []
 
-        scoring = ScoringEngine.evaluate(ticker, insider_data, fundamentals, valuation)
-        if scoring["signal"] != "TRADE":
-            print(f"  [SCOUT-A] {ticker} — scoring rejected: "
-                  f"{' | '.join(str(r) for r in scoring['reasons'][:2])}")
-            return None
+    _prior_headlines = [h["title"] for h in headlines]
 
-        return {
-            "ticker":        ticker,
-            "title":         title,
-            "value":         value,
-            "value_float":   value_float,
-            "mapped_role":   mapped_role,
-            "insider_score": float(scoring["insider_score"]),
-            "reasons":       scoring["reasons"],
-            "fundamentals":  fundamentals,
-            "valuation":     valuation,
-        }
+    min_composite = tcfg.get("min_composite_score", 0.20)
+    results = []
+    for tc_obj in topic_candidates:
+        if tc_obj.composite_score < min_composite:
+            continue
+        results.append({
+            "ticker":          tc_obj.ticker,
+            "topic_label":     tc_obj.topic_label,
+            "topic_momentum":  tc_obj.topic_momentum,
+            "topic_sentiment": tc_obj.topic_sentiment,
+            "exposure_score":  tc_obj.exposure_score,
+            "topic_composite": tc_obj.composite_score,
+            "headline_count":  tc_obj.headline_count,
+            "topic_headlines": tc_obj.headlines,
+        })
 
-    results = await asyncio.gather(*[_eval_one(t) for t in unique], return_exceptions=True)
-    passed  = [r for r in results if isinstance(r, dict)]
-    print(f"[SCOUT-A] {len(passed)}/{len(unique)} insider candidates passed scoring.")
-    return passed
+    print(f"[SCOUT-A] {len(results)} topic candidates above composite threshold.")
+    return results
+
+
+
 
 
 async def scout_statarb_candidates(ctx: OrchestratorContext) -> List[dict]:
@@ -307,11 +362,11 @@ async def scout_statarb_candidates(ctx: OrchestratorContext) -> List[dict]:
 
 async def run_dual_scouts(ctx: OrchestratorContext) -> Tuple[List[dict], List[dict]]:
     """asyncio.gather both scouts — they run fully concurrently."""
-    insider_raws, statarb_raws = await asyncio.gather(
-        scout_insider_candidates(),
+    topic_raws, statarb_raws = await asyncio.gather(
+        scout_topic_candidates(ctx),
         scout_statarb_candidates(ctx),
     )
-    return insider_raws, statarb_raws
+    return topic_raws, statarb_raws
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -322,7 +377,7 @@ async def run_dual_scouts(ctx: OrchestratorContext) -> Tuple[List[dict], List[di
 class UnifiedCandidate:
     # Identity
     ticker:           str
-    source:           str         # 'insider' | 'statarb'
+    source:           str         # 'topic' | 'statarb'
     side:             int         # +1 BUY, -1 SELL
     price:            float = 0.0
 
@@ -344,7 +399,15 @@ class UnifiedCandidate:
     wdegree:          float = 0.0
     sector:           str   = "Unknown"
 
-    # Insider-specific metadata
+    # ── Topical Trading fields (primary scout) ────────────────────────────────
+    topic_label:      str   = ""     # e.g. "AI chip shortage"
+    topic_momentum:   float = 0.0    # BERTopic headline velocity score [0,1]
+    topic_sentiment:  float = 0.0    # FinBERT mean sentiment on topic corpus [-1,+1]
+    exposure_score:   float = 0.0    # How strongly ticker is exposed to topic [0,1]
+    topic_composite:  float = 0.0    # Combined signal score (momentum×sentiment×exposure)
+    topic_headlines:  List[str] = field(default_factory=list)  # Raw topic headlines
+
+    # Legacy / StatArb metadata (kept for backward compat with stat-arb normalize path)
     insider_score:    float = 0.0
     title:            str   = ""
     value_str:        str   = ""
@@ -353,7 +416,8 @@ class UnifiedCandidate:
     # Filled in Layer 4
     rag_report:           str   = ""
     ai_sentiment_score:   float = 0.0
-    ai_price_bullish:     bool  = True
+    ai_news_score:        float = 0.0   # VADER pre-filter score from news_scanner
+    ai_price_bullish:     bool  = False   # fail-closed default: treat as bearish until LSTM confirms
     ai_predicted_return:  float = 0.0
 
     # Filled in Layer 5
@@ -417,12 +481,12 @@ def _topology_from_graph(
     return 0.30, 0.0, 0.0
 
 
-def normalize_insider_candidate(
+def normalize_topic_candidate(
     raw: dict,
     ctx: OrchestratorContext,
     mkt: dict,
 ) -> UnifiedCandidate:
-    """Convert a raw insider dict (from Scout A) into a UnifiedCandidate."""
+    """Convert a raw topic dict (from Scout A) into a UnifiedCandidate."""
     ticker = raw["ticker"]
 
     # Price + per-ticker technicals
@@ -453,13 +517,14 @@ def normalize_insider_candidate(
     except Exception:
         pass
 
-    insider_score   = float(raw.get("insider_score", 0.0))
-    signal_strength = min(insider_score / 10.0, 1.0)   # 0–10 score → 0–1 normalised signal
+    # Topic composite drives signal_strength (0–1 normalised)
+    topic_composite = float(raw.get("topic_composite", 0.0))
+    signal_strength  = min(topic_composite, 1.0)
 
     return UnifiedCandidate(
         ticker           = ticker,
-        source           = "insider",
-        side             = 1,           # insider buys are always long
+        source           = "topic",
+        side             = 1,           # topical momentum is long-biased
         price            = price,
         residual         = 0.0,
         signal_strength  = signal_strength,
@@ -475,10 +540,14 @@ def normalize_insider_candidate(
         degree           = degree,
         wdegree          = wdegree,
         sector           = sector,
-        insider_score    = insider_score,
-        title            = raw.get("title", ""),
-        value_str        = raw.get("value", ""),
         in_universe      = in_universe,
+        # Topical fields
+        topic_label      = raw.get("topic_label", ""),
+        topic_momentum   = float(raw.get("topic_momentum", 0.0)),
+        topic_sentiment  = float(raw.get("topic_sentiment", 0.0)),
+        exposure_score   = float(raw.get("exposure_score", 0.0)),
+        topic_composite  = topic_composite,
+        topic_headlines  = raw.get("topic_headlines", []),
     )
 
 
@@ -543,23 +612,37 @@ def normalize_statarb_candidate(
     )
 
 
-def build_unified_candidates(
-    insider_raws: List[dict],
+async def build_unified_candidates(
+    topic_raws:   List[dict],
     statarb_raws: List[dict],
     ctx: OrchestratorContext,
 ) -> List[UnifiedCandidate]:
     """
-    Normalize both raw lists, merge, and deduplicate by ticker.
-    Insider takes priority when the same ticker appears in both engines.
+    Normalize both raw lists concurrently, merge, and deduplicate by ticker.
+    Topic candidates take priority when the same ticker appears in both engines.
     Zero-price candidates are discarded immediately.
+    Each per-ticker normalization runs in the thread-pool so yfinance calls
+    are all in-flight at the same time instead of executing one-by-one.
     """
-    mkt = _market_context(ctx)
+    loop = asyncio.get_running_loop()
+    mkt  = await loop.run_in_executor(_executor, _market_context, ctx)
 
-    insider_cands = [normalize_insider_candidate(r, ctx, mkt) for r in insider_raws]
-    statarb_cands = [normalize_statarb_candidate(r, ctx, mkt) for r in statarb_raws]
+    topic_results = await asyncio.gather(
+        *[loop.run_in_executor(_executor, normalize_topic_candidate, r, ctx, mkt)
+          for r in topic_raws],
+        return_exceptions=True,
+    )
+    statarb_results = await asyncio.gather(
+        *[loop.run_in_executor(_executor, normalize_statarb_candidate, r, ctx, mkt)
+          for r in statarb_raws],
+        return_exceptions=True,
+    )
+
+    topic_cands  = [c for c in topic_results  if isinstance(c, UnifiedCandidate)]
+    statarb_cands = [c for c in statarb_results if isinstance(c, UnifiedCandidate)]
 
     seen: Dict[str, UnifiedCandidate] = {}
-    for c in insider_cands:
+    for c in topic_cands:
         seen[c.ticker] = c
     for c in statarb_cands:
         if c.ticker not in seen:
@@ -567,8 +650,8 @@ def build_unified_candidates(
 
     candidates = [c for c in seen.values() if c.price > 0]
     print(f"[NORMALIZE] {len(candidates)} unique candidates "
-          f"({len(insider_cands)} insider, {len(statarb_cands)} statarb, "
-          f"{len(insider_cands) + len(statarb_cands) - len(candidates)} duplicates/zero-price dropped).")
+          f"({len(topic_cands)} topic, {len(statarb_cands)} statarb, "
+          f"{len(topic_cands) + len(statarb_cands) - len(candidates)} duplicates/zero-price dropped).")
     return candidates
 
 
@@ -576,11 +659,24 @@ def build_unified_candidates(
 # Layer 4 — Unified AI Audit
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def audit_candidate_ai(candidate: UnifiedCandidate) -> UnifiedCandidate:
+async def audit_candidate_ai(
+    candidate:  UnifiedCandidate,
+    market_ctx: dict | None = None,
+) -> UnifiedCandidate:
     """
     Run all AI gates for a single candidate.
-    Insider candidates: sentiment + LSTM + SEC + earnings (concurrently) → RAG
-    StatArb candidates: sentiment + LSTM (concurrently) → RAG
+    Gate order (all concurrent where possible):
+      [topic source]
+        1. Topic Momentum gate — skip if topic momentum too weak.
+        2. FinBERT re-score   — deep NLP on ticker-specific headlines.
+        3. LSTM price forecast — regime-gated directional 5-day prediction.
+        4. RAG deep research   — informational, no hard gate.
+      [statarb source]
+        1. NewsScanner (VADER) — fast pre-filter.
+        2. FinBERT sentiment   — deep NLP.
+        3. LSTM price forecast.
+        4. RAG deep research.
+    market_ctx keys: vix, spy_above_200dma, health_score  (all optional).
     Mutates and returns the candidate.
     """
     if candidate.skip:
@@ -588,21 +684,60 @@ async def audit_candidate_ai(candidate: UnifiedCandidate) -> UnifiedCandidate:
 
     loop   = asyncio.get_running_loop()
     ticker = candidate.ticker
+    is_topic   = candidate.source == "topic"
+    is_statarb = candidate.source == "statarb"
 
+    # ── Gate 1: Headline sentiment pre-filter ────────────────────────────────
+    # Topic candidates: use BERTopic-computed FinBERT sentiment (already scored).
+    # StatArb candidates: run fast VADER news scan as cheap pre-filter.
+    if is_topic:
+        # Gate 1A: topic sentiment gate (already computed upstream by TopicEngine)
+        if candidate.topic_sentiment < 0.0:   # clearly bearish narrative
+            candidate.skip        = True
+            candidate.skip_reason = f"Topic sentiment negative ({candidate.topic_sentiment:.2f})"
+            print(f"  [AI] {ticker} REJECTED — topic sentiment {candidate.topic_sentiment:.2f} "
+                  f"(topic='{candidate.topic_label}')")
+            return candidate
+        candidate.ai_news_score = candidate.topic_sentiment
+        print(f"  [AI] {ticker} topic gate OK (sentiment={candidate.topic_sentiment:.2f}, "
+              f"momentum={candidate.topic_momentum:.2f}, topic='{candidate.topic_label}')")
+    else:
+        # Gate 1B: VADER news scan for statarb
+        try:
+            news_r = await loop.run_in_executor(_executor, scan_news, ticker)
+        except Exception as e:
+            news_r = {"is_passed": False, "score": 0.0,
+                      "reason": f"News scan exception (fail-safe): {e}"}
+
+        candidate.ai_news_score = float(news_r.get("score", 0.0))
+        if not news_r.get("is_passed", False):
+            candidate.skip        = True
+            candidate.skip_reason = f"News pre-filter blocked ({candidate.ai_news_score:.4f})"
+            log_evaluation(ticker, 0.0, "NO TRADE",
+                           f"News Toxic (VADER={candidate.ai_news_score:.4f})")
+            print(f"  [AI] {ticker} REJECTED — news VADER score {candidate.ai_news_score:.4f}: "
+                  f"{news_r.get('reason', '')}")
+            return candidate
+
+        print(f"  [AI] {ticker} news OK (VADER={candidate.ai_news_score:.4f}) — "
+              f"running deep AI audit…")
+
+    # ── Gates 2-4: Deep AI audit (all I/O-bound, run concurrently) ───────────
     try:
-        if candidate.source == "insider":
-            print(f"  [AI] {ticker} (insider): sentiment + LSTM + SEC + earnings…")
-            sentiment_r, lstm_r, sec_r, earnings_r = await asyncio.gather(
-                loop.run_in_executor(_executor, analyze_sentiment,         ticker),
-                loop.run_in_executor(_executor, predict_price_movement,    ticker),
-                loop.run_in_executor(_executor, analyze_sec_filings,       ticker),
-                loop.run_in_executor(_executor, analyze_earnings_sentiment, ticker),
+        if is_topic:
+            print(f"  [AI] {ticker} (topic): FinBERT re-score + LSTM…")
+            sentiment_r, lstm_r = await asyncio.gather(
+                loop.run_in_executor(_executor, analyze_sentiment,                   ticker),
+                loop.run_in_executor(_executor, predict_price_movement, ticker, market_ctx),
             )
+            sec_r      = {"is_passed": True, "score": 0.0, "full_text": "", "reason": "N/A"}
+            earnings_r = {"is_passed": True, "score": 0.0, "reason": "N/A"}
         else:
+            # statarb: same pipeline as before
             print(f"  [AI] {ticker} (statarb): sentiment + LSTM…")
             sentiment_r, lstm_r = await asyncio.gather(
-                loop.run_in_executor(_executor, analyze_sentiment,      ticker),
-                loop.run_in_executor(_executor, predict_price_movement, ticker),
+                loop.run_in_executor(_executor, analyze_sentiment,                   ticker),
+                loop.run_in_executor(_executor, predict_price_movement, ticker, market_ctx),
             )
             sec_r      = {"is_passed": True, "score": 0.0, "full_text": "", "reason": "N/A"}
             earnings_r = {"is_passed": True, "score": 0.0, "reason": "N/A"}
@@ -612,18 +747,18 @@ async def audit_candidate_ai(candidate: UnifiedCandidate) -> UnifiedCandidate:
         candidate.skip_reason = f"AI gather exception: {e}"
         return candidate
 
-    # ── Gate: FinBERT news sentiment ─────────────────────────────────────────
+    # ── Gate 2: FinBERT news sentiment ───────────────────────────────────────
     candidate.ai_sentiment_score = float(sentiment_r.get("score", 0.0))
-    if not sentiment_r.get("is_passed", True):
+    if not sentiment_r.get("is_passed", False):
         candidate.skip        = True
         candidate.skip_reason = f"Sentiment fail ({candidate.ai_sentiment_score:.2f})"
-        log_evaluation(ticker, candidate.insider_score, "NO TRADE",
+        log_evaluation(ticker, 0.0, "NO TRADE",
                        f"Sentiment Risk ({candidate.ai_sentiment_score:.2f})")
         print(f"  [AI] {ticker} REJECTED — sentiment {candidate.ai_sentiment_score:.2f}")
         return candidate
 
-    # ── Gate: LSTM directional forecast ──────────────────────────────────────
-    candidate.ai_price_bullish    = bool(lstm_r.get("is_bullish", True))
+    # ── Gate 3: LSTM directional forecast ────────────────────────────────────
+    candidate.ai_price_bullish    = bool(lstm_r.get("is_bullish", False))
     candidate.ai_predicted_return = float(lstm_r.get("predicted_return", 0.0))
     direction_ok = (
         (candidate.side ==  1 and     candidate.ai_price_bullish) or
@@ -633,56 +768,56 @@ async def audit_candidate_ai(candidate: UnifiedCandidate) -> UnifiedCandidate:
         candidate.skip        = True
         candidate.skip_reason = (f"LSTM direction mismatch "
                                   f"(bullish={candidate.ai_price_bullish}, side={candidate.side})")
-        log_evaluation(ticker, candidate.insider_score, "NO TRADE",
+        log_evaluation(ticker, 0.0, "NO TRADE",
                        f"LSTM Mismatch (conf={lstm_r.get('confidence', 0):.2f})")
         print(f"  [AI] {ticker} REJECTED — LSTM direction mismatch")
         return candidate
 
-    # ── Gate: SEC 10-K / 10-Q (insider only) ─────────────────────────────────
-    if candidate.source == "insider":
-        if not sec_r.get("is_passed", True):
-            candidate.skip        = True
-            candidate.skip_reason = f"SEC fail ({sec_r.get('score', 0):.2f})"
-            log_evaluation(ticker, candidate.insider_score, "NO TRADE",
-                           f"SEC Risk ({sec_r.get('score', 0):.2f})")
-            print(f"  [AI] {ticker} REJECTED — SEC {sec_r.get('score', 0):.2f}")
-            return candidate
-
-        # ── Gate: Earnings tone (insider only) ───────────────────────────────
-        if not earnings_r.get("is_passed", True):
-            candidate.skip        = True
-            candidate.skip_reason = f"Earnings tone fail ({earnings_r.get('score', 0):.2f})"
-            log_evaluation(ticker, candidate.insider_score, "NO TRADE",
-                           f"Earnings Tone ({earnings_r.get('score', 0):.2f})")
-            print(f"  [AI] {ticker} REJECTED — Earnings tone {earnings_r.get('score', 0):.2f}")
-            return candidate
-
-    # ── RAG deep research — informational, no hard gate ──────────────────────
+    # ── Gate 4: RAG deep research — informational, no hard gate ──────────────
     try:
-        sec_text = sec_r.get("full_text", "") if candidate.source == "insider" else ""
         candidate.rag_report = await loop.run_in_executor(
-            _executor, generate_rag_risk_report, ticker, sec_text
+            _executor, generate_rag_risk_report, ticker, ""
         )
     except Exception:
         candidate.rag_report = "RAG unavailable."
 
-    print(f"  [AI] {ticker} PASSED — "
+    topic_info = (f" topic='{candidate.topic_label}' momentum={candidate.topic_momentum:.2f}"
+                  if is_topic else "")
+    print(f"  [AI] {ticker} PASSED all gates —{topic_info} "
+          f"news={candidate.ai_news_score:.4f}, "
           f"sentiment={candidate.ai_sentiment_score:.2f}, "
           f"LSTM_bullish={candidate.ai_price_bullish}")
     return candidate
+
 
 
 async def apply_ai_audit(
     candidates: List[UnifiedCandidate],
     ctx: OrchestratorContext,
 ) -> List[UnifiedCandidate]:
-    """Audit all non-skipped candidates concurrently via asyncio.gather."""
+    """Audit all non-skipped candidates concurrently via asyncio.gather.
+
+    Builds a shared market_ctx dict from the first candidate's macro fields
+    (all candidates share the same macro environment in a single scan) and
+    passes it to each audit so the LSTM MarketGate can modulate feature weights.
+    """
     active  = [c for c in candidates if not c.skip]
     skipped = [c for c in candidates if     c.skip]
 
-    print(f"\n[AI-AUDIT] Running unified AI audit on {len(active)} candidate(s)…")
+    # Build shared market context for LSTM gating
+    # Prefer candidate-level macro data (already fetched); fallback to ctx
+    _ref = active[0] if active else None
+    market_ctx: dict = {
+        "vix":              float(getattr(_ref, "vix_close",        20.0) if _ref else 20.0),
+        "spy_above_200dma": float(getattr(_ref, "spy_above_200dma",  1.0) if _ref else 1.0),
+        "health_score":     float(ctx.health_score if math.isfinite(ctx.health_score) else 0.5),
+    }
+    print(f"\n[AI-AUDIT] MarketGate context: VIX={market_ctx['vix']:.1f}, "
+          f"SPY>200dma={int(market_ctx['spy_above_200dma'])}, "
+          f"health={market_ctx['health_score']:.2f}")
+    print(f"[AI-AUDIT] Running unified AI audit on {len(active)} candidate(s)…")
     audited = await asyncio.gather(
-        *[audit_candidate_ai(c) for c in active],
+        *[audit_candidate_ai(c, market_ctx=market_ctx) for c in active],
         return_exceptions=True,
     )
 
@@ -861,12 +996,19 @@ def run_risk_sizing(
         cov_regularization   = 1e-3,
     )
 
+    free_equity = ctx.account_equity - ctx.allocated_this_scan
+    if free_equity <= 0:
+        print(f"[SIZING] No free capital (committed=${ctx.allocated_this_scan:.2f} / "
+              f"equity=${ctx.account_equity:.2f}). Sizing skipped.")
+        return pd.DataFrame()
+
     print(f"\n[SIZING] mean-variance allocation — "
-          f"{len(orders_df)} candidates, equity=${ctx.account_equity:.2f}…")
+          f"{len(orders_df)} candidates, free equity=${free_equity:.2f} "
+          f"(${ctx.allocated_this_scan:.2f} already committed this scan)…")
     try:
         sized = allocate_quantities(
             candidates = orders_df,
-            equity     = ctx.account_equity,
+            equity     = free_equity,
             config     = risk_cfg,
         )
         n_tradeable = int((~sized["Skip"]).sum()) if "Skip" in sized.columns else len(sized)
@@ -896,6 +1038,37 @@ def run_execution(
         print("[EXEC] No orders after sizing filter.")
         return None
 
+    # --- Buying-power guard: reject orders that exceed remaining cash ---
+    buying_power = ctx.exec_engine.get_buying_power()
+    if buying_power is None:
+        # Could not fetch BP — fall back to estimated free equity from tracker
+        buying_power = max(0.0, ctx.account_equity - ctx.allocated_this_scan)
+        print(f"[EXEC] Could not fetch live buying power; using estimated free equity "
+              f"${buying_power:.2f} as cap.")
+    else:
+        print(f"[EXEC] Live buying power: ${buying_power:.2f}")
+
+    affordable: List[dict] = []
+    remaining_bp = buying_power
+    for _, row in to_exec.iterrows():
+        needed = float(row.get("Qty", 0)) * float(row.get("price", 0))
+        side   = row.get("side", 1)
+        # SELL orders free up cash — always allow them
+        if str(side).upper() in {"SELL", "-1"} or int(side) == -1 if str(side).lstrip('-').isdigit() else False:
+            affordable.append(row.to_dict())
+            continue
+        if needed <= 0 or remaining_bp >= needed:
+            affordable.append(row.to_dict())
+            remaining_bp = max(0.0, remaining_bp - needed)
+        else:
+            print(f"[EXEC] Skipping {row.get('ticker','?')} — notional ${needed:.2f} "
+                  f"exceeds remaining buying power ${remaining_bp:.2f}.")
+
+    if not affordable:
+        print("[EXEC] All orders rejected by buying-power check.")
+        return None
+
+    to_exec = pd.DataFrame(affordable)
     print(f"[EXEC] Submitting {len(to_exec)} order(s) (DRY_RUN={cfg.DRY_RUN})…")
     try:
         report = ctx.exec_engine.execute_trades(to_exec, dry_run=cfg.DRY_RUN)
@@ -978,6 +1151,66 @@ def dispatch_logging(
 # Layer 8 — Orchestrator & Daemon
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def run_statarb_exits(ctx: OrchestratorContext) -> None:
+    """
+    Signal-based stat-arb exit pass (runs every 30 min, independent of the main scan).
+
+    For every held position that appears in the equities universe, checks whether
+    the current diffusion residual has turned positive (mean-reversion complete).
+    If so, submits a market SELL order directly — bypassing the AI audit gates
+    since it is a closing, not an opening, trade.
+    """
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"\n[STATARB-EXIT] Running exit pass ({ts})…")
+
+    eng = cfg.ENGINES.get("equities", {})
+    sell_thresh = float(eng.get("sell_thresh", getattr(cfg, "SELL_THRESH", 0.01)))
+
+    # Current held positions from Alpaca
+    try:
+        positions = ctx.exec_engine.get_positions()   # {ticker: qty}
+    except Exception as e:
+        print(f"[STATARB-EXIT] Could not fetch positions: {e}. Skipping.")
+        return
+
+    if not positions:
+        print("[STATARB-EXIT] No open positions — nothing to close.")
+        return
+
+    # Latest diffusion residuals from the shared MarketGraph
+    try:
+        sig_engine  = SignalEngine(ctx.market_graph)
+        signals_df  = sig_engine.run_diffusion(alpha=0.5)
+    except Exception as e:
+        print(f"[STATARB-EXIT] SignalEngine failed: {e}. Skipping.")
+        return
+
+    residuals = dict(zip(signals_df["Ticker"], signals_df["Residual"]))
+
+    sell_rows: List[dict] = []
+    for ticker, qty in positions.items():
+        residual = residuals.get(ticker)
+        if residual is None:
+            continue    # not in universe — leave to portfolio_monitor stop-loss
+        if residual > sell_thresh:
+            print(f"[STATARB-EXIT] {ticker}: residual={residual:.4f} > "
+                  f"sell_thresh={sell_thresh:.4f} → queuing SELL {qty}")
+            sell_rows.append({"ticker": ticker, "side": "SELL", "Qty": qty})
+
+    if not sell_rows:
+        print("[STATARB-EXIT] No exit signals this pass.")
+        return
+
+    orders_df = pd.DataFrame(sell_rows)
+    print(f"[STATARB-EXIT] Submitting {len(orders_df)} SELL order(s)…")
+    try:
+        report = ctx.exec_engine.execute_trades(orders_df, dry_run=cfg.DRY_RUN)
+        print(f"[STATARB-EXIT] submitted={report.submitted} | "
+              f"skipped={report.skipped} | errors={report.errors}")
+    except Exception as e:
+        print(f"[STATARB-EXIT] Execution error: {e}")
+
+
 async def _run_unified_scan_async(ctx: OrchestratorContext) -> None:
     """Full async pipeline for one scan cycle."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -988,10 +1221,12 @@ async def _run_unified_scan_async(ctx: OrchestratorContext) -> None:
         print("=== SCAN ABORTED (Market Gate) ===\n")
         return
 
-    # Refresh account equity
+    # Refresh account equity + reset per-scan capital tracker
     live_equity = ctx.exec_engine.get_account_equity()
     if live_equity:
         ctx.account_equity = live_equity
+    ctx.allocated_this_scan = 0.0
+    ctx.positions_this_scan = 0
     print(f"\n[INFO] Account equity: ${ctx.account_equity:.2f}")
 
     # [2] Dual Scouts
@@ -1002,8 +1237,8 @@ async def _run_unified_scan_async(ctx: OrchestratorContext) -> None:
         print("No candidates from either engine. Scan complete.\n")
         return
 
-    # [3] Normalize → UnifiedCandidate list
-    candidates = build_unified_candidates(insider_raws, statarb_raws, ctx)
+    # [3] Normalize → UnifiedCandidate list (concurrent per-ticker yfinance calls)
+    candidates = await build_unified_candidates(insider_raws, statarb_raws, ctx)
     if not candidates:
         print("No valid candidates after normalization. Scan complete.\n")
         return
@@ -1022,11 +1257,29 @@ async def _run_unified_scan_async(ctx: OrchestratorContext) -> None:
         print("No candidates survived. Scan complete.\n")
         return
 
-    # [6] Risk & Sizing
+    # Cap to remaining position slots for this scan
+    remaining_slots = _MAX_POSITIONS_PER_SCAN - ctx.positions_this_scan
+    if len(passed) > remaining_slots:
+        print(f"[SIZING] Capping {len(passed)} candidates to {remaining_slots} slot(s) "
+              f"(scan limit={_MAX_POSITIONS_PER_SCAN}).")
+        passed = passed[:remaining_slots]
+
+    # [6] Risk & Sizing — uses free equity (equity minus already-committed notional)
     sized_orders = run_risk_sizing(passed, ctx)
     if sized_orders.empty:
         print("Sizing returned no orders. Scan complete.\n")
         return
+
+    # Update per-scan capital tracker from sizing output
+    if "Skip" in sized_orders.columns and "target_notional" in sized_orders.columns:
+        tradeable_mask = ~sized_orders["Skip"]
+        ctx.allocated_this_scan += float(
+            sized_orders.loc[tradeable_mask, "target_notional"].abs().sum()
+        )
+        ctx.positions_this_scan += int(tradeable_mask.sum())
+        print(f"[SIZING] Capital committed this scan: "
+              f"${ctx.allocated_this_scan:.2f} / ${ctx.account_equity:.2f} "
+              f"({ctx.positions_this_scan} new position(s))")
 
     # [7] Execute → Notify → Log
     run_execution(sized_orders, ctx)
@@ -1045,14 +1298,20 @@ def run_portfolio_monitor(ctx: OrchestratorContext) -> None:
     """Lightweight job — delegates to portfolio_monitor.evaluate_portfolio()."""
     print(f"\n[PORTFOLIO] Monitor running ({datetime.now().strftime('%H:%M:%S')})…")
     try:
-        evaluate_portfolio()
+        evaluate_portfolio(exec_engine=ctx.exec_engine, dry_run=cfg.DRY_RUN)
     except Exception as e:
         print(f"[PORTFOLIO] Error: {e}")
 
 
 def _is_market_hours() -> bool:
-    """True if current time is approximately within NYSE trading hours (Mon–Fri 09:25–16:05 ET)."""
-    now_et = datetime.now(timezone.utc) - timedelta(hours=4)  # approximate EDT offset
+    """True if current time is within NYSE trading hours (Mon–Fri 09:25–16:05 ET).
+    Uses America/New_York so EST/EDT transitions are handled automatically.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo  # Python <3.9 fallback
+    now_et = datetime.now(ZoneInfo("America/New_York"))
     if now_et.weekday() >= 5:
         return False
     open_  = now_et.replace(hour=9,  minute=25, second=0, microsecond=0)
@@ -1089,27 +1348,39 @@ def main() -> None:
     run_unified_scan(ctx)
     run_portfolio_monitor(ctx)
 
-    # ── Recurring schedule ────────────────────────────────────────────────────
-    # Unified scan: every 60 minutes (market-hours guarded)
-    schedule.every(60).minutes.do(
-        lambda: (run_unified_scan(ctx) if _is_market_hours()
-                 else print("[SCHED] Outside market hours — scan skipped."))
-    )
-    # Portfolio monitor: every 15 minutes (market-hours guarded)
-    schedule.every(15).minutes.do(
-        lambda: run_portfolio_monitor(ctx) if _is_market_hours() else None
-    )
+    # ── APScheduler — each job runs in its own background thread ─────────────
+    def _guarded_scan() -> None:
+        if _is_market_hours():
+            run_unified_scan(ctx)
+        else:
+            print("[SCHED] Outside market hours — scan skipped.")
 
-    print("\n[DAEMON] Active. Unified scan every 60 min | Portfolio monitor every 15 min.")
+    def _guarded_monitor() -> None:
+        if _is_market_hours():
+            run_portfolio_monitor(ctx)
+
+    def _guarded_statarb_exits() -> None:
+        if _is_market_hours():
+            run_statarb_exits(ctx)
+
+    scheduler = BackgroundScheduler(
+        job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 120}
+    )
+    scheduler.add_job(_guarded_scan,           CronTrigger(hour=15, minute=30, timezone="America/New_York"),  id="unified_scan")
+    scheduler.add_job(_guarded_monitor,        IntervalTrigger(minutes=15),  id="portfolio_monitor")
+    scheduler.add_job(_guarded_statarb_exits,  IntervalTrigger(minutes=30),  id="statarb_exits")
+    scheduler.start()
+
+    print("\n[DAEMON] Active. Unified scan at 3:30 PM ET | Portfolio monitor every 15 min "
+          "| StatArb exits every 30 min.")
     print("[DAEMON] Press Ctrl+C to stop.\n")
 
-    while True:
-        try:
-            schedule.run_pending()
-            time.sleep(30)
-        except KeyboardInterrupt:
-            print("\n[DAEMON] Gracefully terminated.")
-            break
+    try:
+        while True:
+            time.sleep(60)
+    except (KeyboardInterrupt, SystemExit):
+        scheduler.shutdown()
+        print("\n[DAEMON] Gracefully terminated.")
 
 
 if __name__ == "__main__":

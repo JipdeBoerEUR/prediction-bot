@@ -26,8 +26,8 @@ def is_market_crashing() -> Tuple[bool, str]:
         vix_history = yf.download('^VIX', period='5d', interval='1d', progress=False)
         
         if sp500_history.empty or vix_history.empty:
-            print("[MACRO] Warning: Could not fetch macro data. Defaulting to safe (no crash).")
-            return False, "Data unavailable"
+            print("[MACRO] WARNING: Could not fetch macro data. Blocking scan (fail-safe).")
+            return True, "Macro data unavailable — failing closed to protect capital."
 
         # Calculate S&P 500 metrics
         # Flatten yfinance dataframe if it's MultiIndex
@@ -54,8 +54,9 @@ def is_market_crashing() -> Tuple[bool, str]:
         
     except Exception as e:
         print(f"[MACRO] Error analyzing market regime: {e}")
-        # Fail open: if Yahoo Finance is down, don't permanently halt the bot
-        return False, f"Error: {e}"
+        # Fail CLOSED: if Yahoo Finance is down, block trading to protect capital.
+        # Resuming on bad/missing data risks buying into unknown conditions.
+        return True, f"Macro check error — failing closed (fail-safe): {e}"
 
 if __name__ == "__main__":
     is_crash, reason = is_market_crashing()
