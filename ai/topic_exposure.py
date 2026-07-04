@@ -13,9 +13,7 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
 import time
 from typing import Dict, List, Optional
@@ -116,7 +114,7 @@ _SEED_MAP: Dict[str, List[str]] = {
 
     # Consumer / Retail
     "WMT":  ["walmart", "retail", "consumer spending", "e-commerce", "grocery"],
-    "AMZN": ["amazon", "retail", "e-commerce", "prime", "aws"],
+    # NOTE: AMZN is defined above in the Tech section with a fuller keyword set.
     "COST": ["costco", "retail", "wholesale", "consumer spending", "membership"],
     "TGT":  ["target", "retail", "consumer spending", "discretionary"],
     "HD":   ["home depot", "housing market", "home improvement", "construction"],

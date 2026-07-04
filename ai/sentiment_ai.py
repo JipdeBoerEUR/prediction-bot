@@ -1,6 +1,5 @@
 import yfinance as yf
 from transformers import pipeline
-import torch
 
 # Initialize the FinBERT sentiment analysis pipeline
 # This will download the model (~400MB) on the first run

@@ -6,7 +6,6 @@ across 5 years of historical data for multiple tickers, and benchmarks it agains
 
 import yfinance as yf
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 import warnings
 

@@ -27,7 +27,6 @@ Backward-compatibility:
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -239,8 +238,8 @@ def _load_model() -> tuple:
 
         # Version gate — old format (no 'arch' key) or wrong version
         if not isinstance(checkpoint, dict) or checkpoint.get("arch") != _ARCH:
-            print(f"[LSTM] Old checkpoint detected (arch mismatch). "
-                  f"Deleting and retraining with v3 gated architecture.")
+            print("[LSTM] Old checkpoint detected (arch mismatch). "
+                  "Deleting and retraining with v3 gated architecture.")
             os.remove(_MODEL_PATH)
             os.remove(_SCALER_PATH)
             return None, None
@@ -341,7 +340,7 @@ def predict_price_movement(ticker: str, market_ctx: dict | None = None) -> dict:
     try:
         # ── 1. Resolve market context ────────────────────────────────────
         if market_ctx is None:
-            print(f"[LSTM] Fetching live market context for gating…")
+            print("[LSTM] Fetching live market context for gating…")
             market_ctx = _fetch_live_market_ctx()
 
         ctx_tensor = _build_ctx_tensor(market_ctx)   # (1, MARKET_DIM)
@@ -406,7 +405,7 @@ def predict_price_movement(ticker: str, market_ctx: dict | None = None) -> dict:
         feature_names = ["daily_return", "range_pct", "volume_change",
                          "sma10_dev", "sma30_dev"]
         gate_info = ", ".join(
-            f"{n}={w:.3f}" for n, w in zip(feature_names, gate_w)
+            f"{n}={w:.3f}" for n, w in zip(feature_names, gate_w, strict=False)
         )
         direction = "BULLISH" if is_bullish else "BEARISH"
         reason = (

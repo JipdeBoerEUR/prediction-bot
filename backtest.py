@@ -199,7 +199,7 @@ def run_backtest(engine_name: str, start: str, end: str) -> dict:
         num_tradeable = 0
     
     # Summary metrics
-    print(f"\n[BACKTEST SUMMARY]")
+    print("\n[BACKTEST SUMMARY]")
     print(f"  Date range:      {start} to {end}")
     print(f"  Starting equity: ${equity:,.2f}")
     print(f"  Buy signals:     {len(buy_candidates)}")

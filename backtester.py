@@ -4,7 +4,6 @@ Evaluates the historical performance of buy signals against the S&P 500 benchmar
 """
 import yfinance as yf
 import pandas as pd
-import numpy as np
 
 def run_backtest(ticker: str, buy_dates: list, hold_period_days: int = 90):
     print(f"\n=== BACKTESTING {ticker} FOR {len(buy_dates)} HISTORICAL SIGNALS ===")

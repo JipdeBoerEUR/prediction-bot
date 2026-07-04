@@ -454,7 +454,7 @@ class TopicEngine:
             {"title": "Exxon Q3 earnings beat on strong refining margins"},
         ]
         topics = self.discover_topics(sample, use_bertopic=False)
-        print(f"\n=== Sample Topic Discovery ===")
+        print("\n=== Sample Topic Discovery ===")
         for t in topics:
             print(f"  Topic: '{t.label}' | headlines={t.headline_count} | "
                   f"momentum={t.momentum:.2f} | sentiment={t.sentiment:.2f}")

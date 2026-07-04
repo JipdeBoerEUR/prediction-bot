@@ -95,7 +95,7 @@ def evaluate_portfolio(exec_engine=None, dry_run=False) -> None:
             print(f"[WARN] {ticker} fundamentals have deteriorated below strict rules!")
             for r in fundamental_failures:
                 print(f"  - {r}")
-            print(f"  => Consider closing the position manually. No auto-sell on fundamentals alone.")
+            print("  => Consider closing the position manually. No auto-sell on fundamentals alone.")
         else:
             print(f"[{ticker}] Fundamentals remain completely stable across all 8 metrics. HOLD position.")
 

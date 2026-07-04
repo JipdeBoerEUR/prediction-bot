@@ -60,9 +60,9 @@ class SignalEngine:
 
     def __post_init__(self) -> None:
         """Validate that the graph engine has the necessary data."""
-        if not hasattr(self.graph_engine, "adjacency_") or getattr(self.graph_engine, "adjacency_").empty:
+        if not hasattr(self.graph_engine, "adjacency_") or self.graph_engine.adjacency_.empty:
             raise ValueError("MarketGraph has no adjacency matrix. Run build_graph() first.")
-        if not hasattr(self.graph_engine, "returns_") or getattr(self.graph_engine, "returns_").empty:
+        if not hasattr(self.graph_engine, "returns_") or self.graph_engine.returns_.empty:
             raise ValueError("MarketGraph has no return data. Run fetch_data() first.")
 
     def run_diffusion(

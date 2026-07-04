@@ -1,6 +1,23 @@
 # Critical Risk Analysis: Prediction Bot Issues
 
-## Status: ✅ ALL ISSUES CONFIRMED
+## Status: ✅ ALL 5 ISSUES RESOLVED (see resolution below)
+
+> **Resolution note (2026-07-04):** Every issue in this document has since been
+> addressed — mostly by the "topical trading engine" rewrite of `main.py` /
+> `ai/price_predictor.py`, plus follow-up fixes. This document is retained as the
+> historical analysis. Current status of each item:
+>
+> | # | Issue | Status | Where it's handled now |
+> |---|-------|--------|------------------------|
+> | 1 | Fail-open trap | ✅ Fixed | `check_market_health()` and `predict_price_movement()` both **fail closed** (`is_bullish=False`, `return False`) on any data/inference error. `macro_filter.py` and `news_scanner.py` also fail closed. |
+> | 2 | OpenInsider latency | ✅ Mitigated | Insider scraping retired as the primary scout; `TopicEngine` (news-narrative momentum) is now the primary signal. |
+> | 3 | Cash-balance illusion | ✅ Fixed | Live `get_buying_power()` guard + per-scan `allocated_this_scan` tracker reject orders exceeding free cash; `_MAX_POSITIONS_PER_SCAN` caps new positions. |
+> | 4 | Synchronous death loop | ✅ Fixed | Per-ticker analysis runs via `asyncio.gather` + `ThreadPoolExecutor`; scouts run concurrently. |
+> | 5 | Schedule blocking | ✅ Fixed | Replaced `schedule`+`sleep` with APScheduler `BackgroundScheduler` (jobs in their own threads); portfolio monitor runs independently every 15 min. |
+>
+> **Additional fix found during review:** the buying-power guard misclassified a
+> float `-1.0` SELL as a BUY (operator-precedence bug), so statarb shorts were
+> wrongly gated by available cash. Fixed via `trade_utils.is_sell_side()` (unit-tested).
 
 This document validates each critical issue found in the prediction bot codebase.
 

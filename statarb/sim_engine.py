@@ -14,7 +14,7 @@ compute_degree_panel           : node degree vectors for every bar in a date lis
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Union
+from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd

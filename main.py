@@ -16,15 +16,13 @@ from __future__ import annotations
 import asyncio
 import math
 import os
-import re
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 import yfinance as yf
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -35,23 +33,20 @@ from apscheduler.triggers.cron         import CronTrigger
 from statarb.regime_engine import RegimeEngine
 from statarb.graph_engine  import MarketGraph
 from statarb.signal_engine import SignalEngine
-from statarb.brain_engine  import BrainEngine, BrainConfig, build_trade_features
+from statarb.brain_engine  import BrainEngine, build_trade_features
 from statarb.risk_manager  import RiskConfig, allocate_quantities
 from statarb.execution     import ExecutionEngine
 import statarb.config as cfg
 
 # ── AI modules ───────────────────────────────────────────────────────────────
 from ai.sentiment_ai      import analyze_sentiment
-from ai.sec_analyzer      import analyze_sec_filings
-from ai.earnings_analyzer import analyze_earnings_sentiment
 from ai.rag_library       import generate_rag_risk_report
 from ai.price_predictor   import predict_price_movement
 from ai.trade_learner     import TradeLearner
 
 # ── Topical Trading modules (new primary scout) ───────────────────────────────
-from ai.news_aggregator  import aggregate_headlines, get_ticker_headlines
-from ai.topic_engine     import TopicEngine, TopicCandidate
-from ai.topic_exposure   import build_exposure_map
+from ai.news_aggregator  import aggregate_headlines
+from ai.topic_engine     import TopicEngine
 
 # ── Root modules ─────────────────────────────────────────────────────────────
 from macro_filter       import is_market_crashing
@@ -59,6 +54,7 @@ from news_scanner       import scan_news
 from notifier           import send_trade_alert, send_statarb_alert
 from logger             import log_evaluation
 from portfolio_monitor  import evaluate_portfolio
+from trade_utils        import is_sell_side
 
 # Retired → kept on disk for reference:
 #   sec_listener.py       → superseded by TopicEngine (topical trading primary scout)
@@ -911,7 +907,10 @@ def derive_all_pwin(
         try:
             batch_df = pd.concat(feature_rows, ignore_index=True)
             probas   = ctx.brain_engine.predict_proba(batch_df)
-            for c, p in zip(active, probas):
+            # strict=True: a length mismatch means predictions would be mispaired
+            # with candidates — raise and fall back to heuristics rather than
+            # silently assigning the wrong probability to a trade.
+            for c, p in zip(active, probas, strict=True):
                 c.p_win_raw = float(p)
         except Exception as e:
             print(f"  [PWIN] BrainEngine.predict_proba error ({e}). Switching to heuristics.")
@@ -1052,9 +1051,9 @@ def run_execution(
     remaining_bp = buying_power
     for _, row in to_exec.iterrows():
         needed = float(row.get("Qty", 0)) * float(row.get("price", 0))
-        side   = row.get("side", 1)
-        # SELL orders free up cash — always allow them
-        if str(side).upper() in {"SELL", "-1"} or int(side) == -1 if str(side).lstrip('-').isdigit() else False:
+        # SELL orders free up cash — always allow them. `side` may be a float
+        # (-1.0 / 1.0), an int, or a string ("SELL" / "BUY" / "-1").
+        if is_sell_side(row.get("side", 1)):
             affordable.append(row.to_dict())
             continue
         if needed <= 0 or remaining_bp >= needed:
@@ -1185,7 +1184,7 @@ def run_statarb_exits(ctx: OrchestratorContext) -> None:
         print(f"[STATARB-EXIT] SignalEngine failed: {e}. Skipping.")
         return
 
-    residuals = dict(zip(signals_df["Ticker"], signals_df["Residual"]))
+    residuals = dict(zip(signals_df["Ticker"], signals_df["Residual"], strict=False))
 
     sell_rows: List[dict] = []
     for ticker, qty in positions.items():

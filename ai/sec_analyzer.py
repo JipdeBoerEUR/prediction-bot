@@ -1,7 +1,5 @@
-import os
 import re
 from transformers import pipeline
-import torch
 import warnings
 
 # Suppress warnings from transformers or edgartools

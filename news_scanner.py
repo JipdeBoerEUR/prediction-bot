@@ -150,6 +150,6 @@ if __name__ == "__main__":
     print(f"  VADER avg     : {result['score']}")
     print(f"  Headlines seen: {result['headline_count']}")
     print(f"  Reason        : {result['reason']}")
-    print(f"  Headlines:")
+    print("  Headlines:")
     for h in result["headlines"]:
         print(f"    • {h}")

@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lint/test tooling
+        run: python -m pip install --upgrade pip ruff pytest
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Byte-compile all modules (syntax gate)
+        run: python -m compileall -q .
+
+      - name: Run tests
+        # Heavy ML deps (torch, transformers, chromadb) are not installed in CI,
+        # so only run tests that don't import them. The unit tests are written to
+        # avoid importing the full trading stack.
+        run: pytest -q tests

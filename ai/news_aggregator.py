@@ -13,10 +13,9 @@ import logging
 import re
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import feedparser
-import requests
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +185,6 @@ def get_ticker_headlines(
 
 
 if __name__ == "__main__":
-    import json
     logging.basicConfig(level=logging.INFO)
     hl = aggregate_headlines(force_refresh=True)
     print(f"\nTotal headlines: {len(hl)}")

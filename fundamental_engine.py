@@ -5,7 +5,7 @@ Output: True/False if the company passes the screen.
 """
 
 import yfinance as yf
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Optional
 
 def fetch_fundamentals_data(ticker: str) -> Optional[Tuple[Dict[str, float], Dict[str, float]]]:
     """

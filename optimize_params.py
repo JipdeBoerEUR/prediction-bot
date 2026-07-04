@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-import os
 import warnings
 from pathlib import Path
 from typing import Dict, Optional
@@ -215,7 +214,6 @@ def _generate_events_in_memory(
         _compute_rsi,
         _apply_cost,
     )
-    from regime_engine import RegimeEngine
 
     bcfg = BuildConfig(
         entry_z           = trial_params["entry_z"],
@@ -447,7 +445,7 @@ def _load_shared_data(engine: str, refresh_cache: bool = False):
         pass
 
     macro = _fetch_macro_series(start=start, end=end)
-    if isinstance(macro.index, pd.DatetimeIndex) and macro.index.tz is not Nohone:
+    if isinstance(macro.index, pd.DatetimeIndex) and macro.index.tz is not None:
         macro.index = macro.index.tz_convert("UTC").tz_localize(None)
 
     # Save to cache
