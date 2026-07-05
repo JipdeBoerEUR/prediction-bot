@@ -53,8 +53,9 @@ from macro_filter       import is_market_crashing
 from news_scanner       import scan_news
 from notifier           import send_trade_alert, send_statarb_alert
 from logger             import log_evaluation
-from portfolio_monitor  import evaluate_portfolio
+from portfolio_monitor  import evaluate_portfolio, monitor_live_positions
 from trade_utils        import is_sell_side
+from position_ledger    import record_position, remove_position, load_ledger as load_position_ledger
 
 # Retired → kept on disk for reference:
 #   sec_listener.py       → superseded by TopicEngine (topical trading primary scout)
@@ -879,6 +880,14 @@ def _build_features_row(candidate: UnifiedCandidate, ctx: OrchestratorContext) -
         "wdegree":          candidate.wdegree,
         "side":             float(candidate.side),
         "sector":           candidate.sector,
+        # High-alpha features the model was trained with — predict_proba
+        # rejects the row if any expected column is missing. History-based
+        # ones default to 0.0 (no-change); vix_adj mirrors build_trade_features.
+        "residual_velocity": 0.0,
+        "degree_delta_5":    0.0,
+        "vix_adj_residual":  candidate.abs_residual / (
+            1.0 + (candidate.vix_close if math.isfinite(candidate.vix_close) else 20.0) / 20.0
+        ),
     }])
 
 
@@ -903,7 +912,8 @@ def derive_all_pwin(
     feature_rows = [_build_features_row(c, ctx) for c in active]
 
     # ── BrainEngine batch predict ─────────────────────────────────────────────
-    if ctx.brain_engine.fitted_:
+    model_ok = ctx.brain_engine.fitted_
+    if model_ok:
         try:
             batch_df = pd.concat(feature_rows, ignore_index=True)
             probas   = ctx.brain_engine.predict_proba(batch_df)
@@ -913,11 +923,15 @@ def derive_all_pwin(
             for c, p in zip(active, probas, strict=True):
                 c.p_win_raw = float(p)
         except Exception as e:
-            print(f"  [PWIN] BrainEngine.predict_proba error ({e}). Switching to heuristics.")
-            ctx.brain_engine.fitted_ = False
+            # Fall back for THIS batch only. Do not flip brain_engine.fitted_ —
+            # that permanently disabled the trained model for the daemon's
+            # remaining lifetime after a single transient failure.
+            print(f"  [PWIN] BrainEngine.predict_proba error ({e}). "
+                  "Using heuristics for this batch.")
+            model_ok = False
 
     # ── Heuristic fallback ────────────────────────────────────────────────────
-    if not ctx.brain_engine.fitted_:
+    if not model_ok:
         for c in active:
             if c.source == "insider":
                 # insider_score on 0–10 scale → maps to 0.40–0.70
@@ -928,13 +942,20 @@ def derive_all_pwin(
 
     # ── TradeLearner confidence multiplier + final gate ───────────────────────
     for c in active:
-        try:
-            mult = float(ctx.trade_learner.get_confidence_multiplier(
-                c.ticker,
-                {"insider_score": c.insider_score, "reasons": [c.source, c.sector]},
-            ))
-        except Exception:
-            mult = 1.0
+        # The learner was trained on insider-flow features (CEO flag, conviction
+        # in $M). Topic/statarb candidates have neither, so the model returns
+        # the same constant for all of them — a constant below ~0.85 would
+        # silently gate out EVERY trade. Only apply it to insider candidates,
+        # whose title actually carries the CEO/conviction signal.
+        mult = 1.0
+        if c.source == "insider":
+            try:
+                mult = float(ctx.trade_learner.get_confidence_multiplier(
+                    c.ticker,
+                    {"insider_score": c.insider_score, "reasons": [str(c.title), c.sector]},
+                ))
+            except Exception:
+                mult = 1.0
 
         c.p_win_final = min(0.95, c.p_win_raw * mult)
 
@@ -1001,6 +1022,19 @@ def run_risk_sizing(
               f"equity=${ctx.account_equity:.2f}). Sizing skipped.")
         return pd.DataFrame()
 
+    # Build a covariance matrix from the shared MarketGraph so the configured
+    # mean_variance branch actually runs — allocate_quantities silently falls
+    # back to proportional sizing whenever cov_matrix is None.
+    cov_matrix = None
+    try:
+        rets = getattr(ctx.market_graph, "returns_", None)
+        if rets is not None and not rets.empty:
+            in_univ = [t for t in orders_df["ticker"].astype(str) if t in rets.columns]
+            if len(in_univ) >= 2:
+                cov_matrix = rets[in_univ].tail(60).cov()
+    except Exception as e:
+        print(f"[SIZING] Covariance build failed ({e}) — proportional sizing fallback.")
+
     print(f"\n[SIZING] mean-variance allocation — "
           f"{len(orders_df)} candidates, free equity=${free_equity:.2f} "
           f"(${ctx.allocated_this_scan:.2f} already committed this scan)…")
@@ -1009,6 +1043,7 @@ def run_risk_sizing(
             candidates = orders_df,
             equity     = free_equity,
             config     = risk_cfg,
+            cov_matrix = cov_matrix,
         )
         n_tradeable = int((~sized["Skip"]).sum()) if "Skip" in sized.columns else len(sized)
         print(f"[SIZING] {n_tradeable}/{len(sized)} positions tradeable.")
@@ -1096,7 +1131,11 @@ def dispatch_notifications(
     statarb_rows = []
     for _, row in executed.iterrows():
         c = candidates_map.get(row.get("ticker", ""))
-        if c and c.source == "insider":
+        # Topic-momentum trades are long entries with SL/TP semantics, same as
+        # the old insider trades — route both to the bracket-style alert.
+        # (Nothing produces source=="insider" anymore, so matching only on it
+        # left this whole branch dead and topic alerts misrouted.)
+        if c and c.source in {"insider", "topic"}:
             try:
                 send_trade_alert(
                     ticker          = c.ticker,
@@ -1139,7 +1178,11 @@ def dispatch_logging(
         c = candidates_map.get(row.get("ticker", ""))
         if not c:
             continue
-        signal  = "TRADE" if c.source == "insider" else "STATARB_TRADE"
+        signal = {
+            "insider": "TRADE",
+            "topic":   "TOPIC_TRADE",
+            "statarb": "STATARB_TRADE",
+        }.get(c.source, f"{str(c.source).upper()}_TRADE")
         reasons = (f"source={c.source} | strategy={c.source} | "
                    f"p_win={c.p_win_final:.3f} | strength={c.signal_strength:.4f} | "
                    f"sector={c.sector}")
@@ -1186,26 +1229,45 @@ def run_statarb_exits(ctx: OrchestratorContext) -> None:
 
     residuals = dict(zip(signals_df["Ticker"], signals_df["Residual"], strict=False))
 
-    sell_rows: List[dict] = []
+    # Only touch positions the statarb strategy itself opened. A positive
+    # residual means "outperforming peers" — for a topic-momentum long that is
+    # the desired state, and force-selling it here systematically cut the
+    # momentum strategy's winners. Unledgered (manual/pre-existing) positions
+    # are also left alone.
+    ledger = load_position_ledger()
+
+    exit_rows: List[dict] = []
     for ticker, qty in positions.items():
+        meta = ledger.get(ticker)
+        if not isinstance(meta, dict) or meta.get("source") != "statarb":
+            continue
         residual = residuals.get(ticker)
         if residual is None:
-            continue    # not in universe — leave to portfolio_monitor stop-loss
-        if residual > sell_thresh:
+            continue    # not in universe — leave to the SL/TP monitor
+        if qty > 0 and residual > sell_thresh:
             print(f"[STATARB-EXIT] {ticker}: residual={residual:.4f} > "
-                  f"sell_thresh={sell_thresh:.4f} → queuing SELL {qty}")
-            sell_rows.append({"ticker": ticker, "side": "SELL", "Qty": qty})
+                  f"{sell_thresh:.4f} → closing LONG {qty}")
+            exit_rows.append({"ticker": ticker, "side": "SELL", "Qty": qty})
+        elif qty < 0 and residual < -sell_thresh:
+            # Short book: entered rich vs peers; reversion is complete once
+            # the residual swings negative → BUY to cover.
+            print(f"[STATARB-EXIT] {ticker}: residual={residual:.4f} < "
+                  f"-{sell_thresh:.4f} → covering SHORT {abs(qty)}")
+            exit_rows.append({"ticker": ticker, "side": "BUY", "Qty": abs(qty)})
 
-    if not sell_rows:
+    if not exit_rows:
         print("[STATARB-EXIT] No exit signals this pass.")
         return
 
-    orders_df = pd.DataFrame(sell_rows)
-    print(f"[STATARB-EXIT] Submitting {len(orders_df)} SELL order(s)…")
+    orders_df = pd.DataFrame(exit_rows)
+    print(f"[STATARB-EXIT] Submitting {len(orders_df)} exit order(s)…")
     try:
         report = ctx.exec_engine.execute_trades(orders_df, dry_run=cfg.DRY_RUN)
         print(f"[STATARB-EXIT] submitted={report.submitted} | "
               f"skipped={report.skipped} | errors={report.errors}")
+        for rec in report.details:
+            if rec.get("status") in {"submitted", "dry_run"}:
+                remove_position(rec.get("ticker", ""))
     except Exception as e:
         print(f"[STATARB-EXIT] Execution error: {e}")
 
@@ -1256,12 +1318,13 @@ async def _run_unified_scan_async(ctx: OrchestratorContext) -> None:
         print("No candidates survived. Scan complete.\n")
         return
 
-    # Cap to remaining position slots for this scan
+    # Cap to remaining position slots for this scan — keep the HIGHEST-P_win
+    # candidates, not whichever happened to come first in dict order.
     remaining_slots = _MAX_POSITIONS_PER_SCAN - ctx.positions_this_scan
     if len(passed) > remaining_slots:
         print(f"[SIZING] Capping {len(passed)} candidates to {remaining_slots} slot(s) "
               f"(scan limit={_MAX_POSITIONS_PER_SCAN}).")
-        passed = passed[:remaining_slots]
+        passed = sorted(passed, key=lambda c: c.p_win_final, reverse=True)[:remaining_slots]
 
     # [6] Risk & Sizing — uses free equity (equity minus already-committed notional)
     sized_orders = run_risk_sizing(passed, ctx)
@@ -1269,7 +1332,13 @@ async def _run_unified_scan_async(ctx: OrchestratorContext) -> None:
         print("Sizing returned no orders. Scan complete.\n")
         return
 
-    # Update per-scan capital tracker from sizing output
+    # [7] Execute → Notify → Log
+    report = run_execution(sized_orders, ctx)
+
+    # Update the per-scan capital tracker AFTER execution: run_execution's
+    # buying-power fallback estimates free cash as (equity − allocated_this_scan),
+    # so committing this batch's notional beforehand double-counted the very
+    # orders being executed and wrongly rejected affordable BUYs.
     if "Skip" in sized_orders.columns and "target_notional" in sized_orders.columns:
         tradeable_mask = ~sized_orders["Skip"]
         ctx.allocated_this_scan += float(
@@ -1280,8 +1349,18 @@ async def _run_unified_scan_async(ctx: OrchestratorContext) -> None:
               f"${ctx.allocated_this_scan:.2f} / ${ctx.account_equity:.2f} "
               f"({ctx.positions_this_scan} new position(s))")
 
-    # [7] Execute → Notify → Log
-    run_execution(sized_orders, ctx)
+    # Record which strategy opened each submitted position so the statarb
+    # exit pass and the SL/TP monitor can tell the books apart.
+    if report is not None:
+        for rec in report.details:
+            if rec.get("status") in {"submitted", "dry_run"}:
+                c = candidates_map.get(rec.get("ticker", ""))
+                if c is not None:
+                    try:
+                        record_position(c.ticker, c.source, c.side)
+                    except Exception as e:
+                        print(f"[LEDGER] Could not record {c.ticker}: {e}")
+
     dispatch_notifications(sized_orders, candidates_map)
     dispatch_logging(sized_orders, candidates_map)
 
@@ -1294,8 +1373,18 @@ def run_unified_scan(ctx: OrchestratorContext) -> None:
 
 
 def run_portfolio_monitor(ctx: OrchestratorContext) -> None:
-    """Lightweight job — delegates to portfolio_monitor.evaluate_portfolio()."""
+    """15-min job: SL/TP on live bot positions + legacy portfolio.json check."""
     print(f"\n[PORTFOLIO] Monitor running ({datetime.now().strftime('%H:%M:%S')})…")
+
+    # Live Alpaca positions — the ones the bot itself opens. Without this,
+    # bot positions had no automated stop-loss/take-profit at all (the legacy
+    # monitor below only reads the static portfolio.json).
+    try:
+        monitor_live_positions(ctx.exec_engine, dry_run=cfg.DRY_RUN)
+    except Exception as e:
+        print(f"[PORTFOLIO] Live-position monitor error: {e}")
+
+    # Legacy manual-holdings monitor (portfolio.json)
     try:
         evaluate_portfolio(exec_engine=ctx.exec_engine, dry_run=cfg.DRY_RUN)
     except Exception as e:

@@ -238,7 +238,19 @@ def build_exposure_map(
 
     now = time.time()
     if _exposure_cache and now - _cache_ts < _CACHE_TTL:
-        return {t: _exposure_cache.get(t, []) for t in tickers}
+        # The cache is keyed by whichever ticker list built it first. Returning
+        # .get(t, []) meant a later call with extra tickers silently got zero
+        # exposure for them (for up to a week). Build just the missing ones
+        # and merge instead.
+        missing = [t for t in tickers if t not in _exposure_cache]
+        for ticker in missing:
+            seed = _SEED_MAP.get(ticker, [ticker.lower()])
+            _exposure_cache[ticker] = (
+                _enrich_from_yfinance(ticker, seed) if use_yfinance else seed
+            )
+        if missing:
+            logger.info("[topic_exposure] Added %d missing tickers to cache.", len(missing))
+        return {t: _exposure_cache[t] for t in tickers}
 
     logger.info("[topic_exposure] Building exposure map for %d tickers…", len(tickers))
     result: Dict[str, List[str]] = {}

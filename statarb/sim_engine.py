@@ -105,7 +105,7 @@ def solve_diffusion_residual(
     alpha: float = 0.5,
     regularization: float = 1e-6,
 ) -> np.ndarray:
-    """Laplacian diffusion: solve (I - alpha*L + reg*I)h = x, return x - h.
+    """Laplacian diffusion: solve (I + alpha*L + reg*I)h = x, return x - h.
 
     Parameters
     ----------
@@ -126,7 +126,9 @@ def solve_diffusion_residual(
     n = len(x)
     D = np.diag(W.sum(axis=1))
     L = D - W
-    A = np.eye(n) - alpha * L + regularization * np.eye(n)
+    # (I + αL) is SPD → stable solve, true smoothing. See signal_engine.py for
+    # why the previous (I − αL) form produced sign-flipped residuals.
+    A = np.eye(n) + alpha * L + regularization * np.eye(n)
 
     if _HAVE_SCIPY:
         try:

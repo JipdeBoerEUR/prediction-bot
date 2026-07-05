@@ -209,9 +209,11 @@ def allocate_quantities(
     if bool(config.dollar_neutral) and (np.any(w > 0) and np.any(w < 0)):
         w = w - float(np.mean(w))
 
-    # Scale to gross leverage cap
+    # Gross-leverage cap — scale DOWN only. Scaling up as well meant every
+    # portfolio (even a single marginal-edge candidate) was inflated to the
+    # full leverage cap, making total conviction irrelevant to gross exposure.
     gross = float(np.sum(np.abs(w)))
-    if gross > 0:
+    if gross > float(config.max_gross_leverage):
         w = w * (float(config.max_gross_leverage) / gross)
 
     # Per-asset weight cap

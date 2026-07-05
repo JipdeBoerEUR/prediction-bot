@@ -383,13 +383,26 @@ def build_trade_features(
         if src in df.columns and dst not in df.columns:
             df[dst] = df[src]
 
-    df["side"] = np.where(df["residual"] < 0, 1, -1).astype(int)
+    # residual < 0 → underperformed peers → BUY (+1); residual > 0 → SELL (-1).
+    # residual == 0 only occurs for synthetic topic-momentum rows, which are
+    # always LONG — mapping 0 to -1 would score the model for the wrong side.
+    df["side"] = np.where(df["residual"] <= 0, 1, -1).astype(int)
     df["abs_residual"] = df["residual"].abs()
     # residual_z matches the z-scored residual used for signal_strength when enabled
     df["residual_z"] = np.sign(df["residual"].to_numpy(dtype=float)) * df["signal_strength"].to_numpy(dtype=float)
 
     if not hasattr(market_graph, "returns_") or market_graph.returns_.empty:
         raise ValueError("market_graph must have non-empty returns_. Call fetch_data() first.")
+
+    # Coerce as_of to the same tz-awareness as the returns index — comparing a
+    # tz-aware Timestamp against a tz-naive DatetimeIndex raises TypeError
+    # (yfinance daily bars are tz-naive; callers pass Timestamp.now(tz="UTC")).
+    ret_idx = market_graph.returns_.index
+    if isinstance(ret_idx, pd.DatetimeIndex):
+        if ret_idx.tz is None and used_date.tzinfo is not None:
+            used_date = used_date.tz_convert("UTC").tz_localize(None)
+        elif ret_idx.tz is not None and used_date.tzinfo is None:
+            used_date = used_date.tz_localize(ret_idx.tz)
 
     # M1: use strict less-than to exclude the prediction bar from feature computation
     prior_returns = market_graph.returns_[market_graph.returns_.index < used_date]

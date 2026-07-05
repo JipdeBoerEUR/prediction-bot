@@ -65,16 +65,47 @@ class ExecutionEngine:
         except Exception:
             return None
 
-    def get_positions(self) -> Dict[str, int]:
-        """Public helper used by main.py to enforce MAX_POSITIONS and avoid duplicate buys."""
-        out: Dict[str, int] = {}
+    def get_positions(self) -> Dict[str, float]:
+        """Public helper used by main.py to enforce MAX_POSITIONS and avoid duplicate buys.
+
+        Quantities are floats — Alpaca supports fractional shares, and truncating
+        to int made sub-share positions read as 0 (invisible, and therefore
+        impossible to close through this engine).
+        """
+        out: Dict[str, float] = {}
         try:
             pos = self.client.get_all_positions()
         except Exception:
             return out
         for p in pos:
             try:
-                out[str(p.symbol)] = int(float(p.qty))
+                out[str(p.symbol)] = float(p.qty)
+            except Exception:
+                continue
+        return out
+
+    def get_positions_detailed(self) -> List[dict]:
+        """Return live positions with entry/current prices for SL/TP monitoring.
+
+        Each dict: ticker, qty (float, negative = short), avg_entry_price,
+        current_price, unrealized_plpc (fraction, signed for direction).
+        """
+        out: List[dict] = []
+        try:
+            pos = self.client.get_all_positions()
+        except Exception:
+            return out
+        for p in pos:
+            try:
+                cur = getattr(p, "current_price", None)
+                plpc = getattr(p, "unrealized_plpc", None)
+                out.append({
+                    "ticker": str(p.symbol),
+                    "qty": float(p.qty),
+                    "avg_entry_price": float(p.avg_entry_price),
+                    "current_price": float(cur) if cur is not None else None,
+                    "unrealized_plpc": float(plpc) if plpc is not None else None,
+                })
             except Exception:
                 continue
         return out
@@ -147,7 +178,10 @@ class ExecutionEngine:
                 ticker = str(row.get("ticker", "")).strip().upper()
                 rec["ticker"] = ticker
 
-                qty = int(row.get("Qty", 0))
+                # Alpaca supports fractional shares — do NOT truncate to int.
+                # The sizing pipeline emits quantities down to 0.001 shares;
+                # int() silently dropped every sub-share order.
+                qty = round(float(row.get("Qty", 0) or 0), 3)
                 rec["qty"] = qty
 
                 # Determine side early
@@ -200,26 +234,55 @@ class ExecutionEngine:
                     details.append(rec)
                     continue
 
-                # Position sanity checks
-                held_qty = int(positions.get(ticker, 0))
-                if side == OrderSide.SELL and held_qty <= 0:
-                    skipped += 1
-                    rec["status"] = "skipped"
-                    rec["reason"] = "no position to sell"
-                    details.append(rec)
-                    continue
+                # Position sanity checks (fractional-aware, short-aware)
+                held_qty = float(positions.get(ticker, 0.0))
+
+                if side == OrderSide.SELL and held_qty > 0:
+                    # Closing (part of) a long — never sell more than held,
+                    # which would silently flip the position into a short.
+                    if qty > held_qty:
+                        qty = held_qty
+                        rec["qty"] = qty
+
+                elif side == OrderSide.SELL:
+                    # No long position → this SELL is a short entry.
+                    # (The old code skipped ALL of these as "no position to
+                    # sell", so the allow_short flag below was dead code and
+                    # short entries could never execute.)
+                    if held_qty < 0:
+                        skipped += 1
+                        rec["status"] = "skipped"
+                        rec["reason"] = "already short"
+                        details.append(rec)
+                        continue
+                    if not allow_short:
+                        skipped += 1
+                        rec["status"] = "skipped"
+                        rec["reason"] = "shorting disabled"
+                        details.append(rec)
+                        continue
+                    # Alpaca does not support fractional short selling.
+                    qty = float(int(qty))
+                    rec["qty"] = qty
+                    if qty < 1:
+                        skipped += 1
+                        rec["status"] = "skipped"
+                        rec["reason"] = "fractional short not supported"
+                        details.append(rec)
+                        continue
+
                 if side == OrderSide.BUY and held_qty > 0:
                     skipped += 1
                     rec["status"] = "skipped"
                     rec["reason"] = "already holding"
                     details.append(rec)
                     continue
-                if not allow_short and side == OrderSide.SELL and held_qty <= 0:
-                    skipped += 1
-                    rec["status"] = "skipped"
-                    rec["reason"] = "shorting disabled"
-                    details.append(rec)
-                    continue
+                if side == OrderSide.BUY and held_qty < 0:
+                    # Buy-to-cover an existing short. Alpaca rejects orders
+                    # that would flip a position in one go — cap at short size.
+                    if qty > abs(held_qty):
+                        qty = abs(held_qty)
+                        rec["qty"] = qty
 
                 if dry_run:
                     print(f"DRY_RUN: {side.name} {qty} {ticker}")

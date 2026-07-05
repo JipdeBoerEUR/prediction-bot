@@ -4,8 +4,8 @@ SignalEngine: Graph Signal Processing (GSP) Logic for Statistical Arbitrage
 ================================================================================
 Implements Laplacian Diffusion to generate trading signals based on market topology.
 
-Core Logic (Laplacian Diffusion):
-    h = (I - alpha * L)^(-1) * x
+Core Logic (Laplacian Diffusion / Tikhonov graph smoothing):
+    h = (I + alpha * L)^(-1) * x
     r = x - h
 
 Where:
@@ -77,7 +77,7 @@ class SignalEngine:
         Execute Laplacian diffusion to extract residual signals for a given date.
 
         Solves:
-            (I - alpha * L + regularization * I) h = x
+            (I + alpha * L + regularization * I) h = x
 
         Parameters
         ----------
@@ -142,7 +142,13 @@ class SignalEngine:
         I = np.eye(n)
 
         # System matrix
-        A = I - (alpha * L) + (regularization * I)
+        # Tikhonov graph smoother: (I + αL) is symmetric positive-definite
+        # (eigenvalues 1 + αλ ≥ 1), so the solve is unconditionally stable and
+        # h is a true peer-implied smoothing of x. The previous (I − αL) form
+        # is indefinite whenever any Laplacian eigenvalue exceeds 1/α — routine
+        # for a weighted correlation graph — which amplified and sign-flipped
+        # residuals instead of smoothing them.
+        A = I + (alpha * L) + (regularization * I)
 
         # Solve for expected returns h
         if _HAVE_SCIPY:
@@ -169,7 +175,7 @@ class SignalEngine:
                 I_v = np.eye(n_v)
                 D_v = np.diag(W.sum(axis=1))
                 L_v = D_v - W
-                A_v = I_v - (alpha * L_v) + (regularization * I_v)
+                A_v = I_v + (alpha * L_v) + (regularization * I_v)
                 for row_vals in hist_window.to_numpy():
                     if not np.all(np.isfinite(row_vals)):
                         continue

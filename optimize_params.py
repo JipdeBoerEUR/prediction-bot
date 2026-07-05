@@ -107,9 +107,12 @@ PARAM_BOUNDS_PHASE2 = {
 #   exit_z           min=0.29  max=0.32  mean=0.30   top3≈[0.29, 0.32, 0.29] ← very tight!
 PARAM_BOUNDS_PHASE3 = {
     "entry_z":           (1.117, 2.254),
-    "hold_bars":         (96.3, 116.7),
+    # Integer parameters MUST have integer bounds — trial.suggest_int rejects
+    # floats, which aborted every --phase3 run before the first trial.
+    # lookback_bars bounds are also aligned to the sampler's step=50.
+    "hold_bars":         (96, 117),
     "graph_threshold":   (0.438, 0.462),   # extremely tight (0.44–0.46)
-    "lookback_bars":     (935.0, 1115.0),
+    "lookback_bars":     (950, 1100),
     "cost_bps":          (0.042, 0.472),
     "regime_min_health": (0.297, 0.503),
     "alpha":             (0.789, 0.894),
@@ -121,12 +124,17 @@ def _sample_params(trial, bounds: Dict[str, tuple]) -> Dict[str, float | int]:
     """Sample one trial from the provided bounds."""
     return {
         "entry_z": trial.suggest_float("entry_z", bounds["entry_z"][0], bounds["entry_z"][1]),
-        "hold_bars": trial.suggest_int("hold_bars", bounds["hold_bars"][0], bounds["hold_bars"][1]),
+        "hold_bars": trial.suggest_int(
+            "hold_bars", int(round(bounds["hold_bars"][0])), int(round(bounds["hold_bars"][1]))
+        ),
         "graph_threshold": trial.suggest_float(
             "graph_threshold", bounds["graph_threshold"][0], bounds["graph_threshold"][1]
         ),
         "lookback_bars": trial.suggest_int(
-            "lookback_bars", bounds["lookback_bars"][0], bounds["lookback_bars"][1], step=50
+            "lookback_bars",
+            int(round(bounds["lookback_bars"][0])),
+            int(round(bounds["lookback_bars"][1])),
+            step=50,
         ),
         "cost_bps": trial.suggest_float("cost_bps", bounds["cost_bps"][0], bounds["cost_bps"][1]),
         "regime_min_health": trial.suggest_float(

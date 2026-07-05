@@ -43,8 +43,18 @@ _ARCH = "v3_gated"
 # ── Paths ────────────────────────────────────────────────────────────────────
 _DIR        = os.path.dirname(os.path.abspath(__file__))
 _MODEL_DIR  = os.path.join(_DIR, "..", "models")
-_MODEL_PATH = os.path.join(_MODEL_DIR, "price_lstm.pt")
-_SCALER_PATH = os.path.join(_MODEL_DIR, "price_scaler.pkl")
+
+
+# Per-ticker checkpoints. A single global checkpoint meant the LSTM and —
+# worse — the StandardScaler fitted on the FIRST ticker ever predicted were
+# silently reused for every other ticker, distorting inputs by another
+# stock's return/volume distribution.
+def _model_path(ticker: str) -> str:
+    return os.path.join(_MODEL_DIR, f"price_lstm_{ticker.upper()}.pt")
+
+
+def _scaler_path(ticker: str) -> str:
+    return os.path.join(_MODEL_DIR, f"price_scaler_{ticker.upper()}.pkl")
 
 # ── Hyper-parameters ────────────────────────────────────────────────────────
 LOOKBACK     = 60     # days of history fed into the LSTM
@@ -221,38 +231,40 @@ def _create_sequences(features: np.ndarray, targets: np.ndarray,
 # ═════════════════════════════════════════════════════════════════════════════
 #  Model Persistence  (versioned save/load)
 # ═════════════════════════════════════════════════════════════════════════════
-def _save_model(model: PriceLSTM, scaler: StandardScaler):
+def _save_model(model: PriceLSTM, scaler: StandardScaler, ticker: str):
     os.makedirs(_MODEL_DIR, exist_ok=True)
-    torch.save({"arch": _ARCH, "state_dict": model.state_dict()}, _MODEL_PATH)
-    with open(_SCALER_PATH, "wb") as f:
+    torch.save({"arch": _ARCH, "state_dict": model.state_dict()}, _model_path(ticker))
+    with open(_scaler_path(ticker), "wb") as f:
         pickle.dump(scaler, f)
-    print(f"[LSTM] v3 model and scaler saved to {_MODEL_DIR}")
+    print(f"[LSTM] v3 model and scaler for {ticker} saved to {_MODEL_DIR}")
 
 
-def _load_model() -> tuple:
-    """Returns (model, scaler) or (None, None) if no valid v3 checkpoint exists."""
-    if not os.path.exists(_MODEL_PATH) or not os.path.exists(_SCALER_PATH):
+def _load_model(ticker: str) -> tuple:
+    """Returns (model, scaler) for this ticker, or (None, None) if no valid
+    v3 checkpoint exists for it."""
+    model_path, scaler_path = _model_path(ticker), _scaler_path(ticker)
+    if not os.path.exists(model_path) or not os.path.exists(scaler_path):
         return None, None
     try:
-        checkpoint = torch.load(_MODEL_PATH, map_location="cpu", weights_only=False)
+        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
 
         # Version gate — old format (no 'arch' key) or wrong version
         if not isinstance(checkpoint, dict) or checkpoint.get("arch") != _ARCH:
-            print("[LSTM] Old checkpoint detected (arch mismatch). "
+            print(f"[LSTM] Old checkpoint for {ticker} (arch mismatch). "
                   "Deleting and retraining with v3 gated architecture.")
-            os.remove(_MODEL_PATH)
-            os.remove(_SCALER_PATH)
+            os.remove(model_path)
+            os.remove(scaler_path)
             return None, None
 
         model = PriceLSTM()
         model.load_state_dict(checkpoint["state_dict"])
         model.eval()
-        with open(_SCALER_PATH, "rb") as f:
+        with open(scaler_path, "rb") as f:
             scaler = pickle.load(f)
-        print("[LSTM] Loaded v3 gated model checkpoint.")
+        print(f"[LSTM] Loaded v3 gated model checkpoint for {ticker}.")
         return model, scaler
     except Exception as e:
-        print(f"[LSTM] Failed to load checkpoint: {e}. Will retrain.")
+        print(f"[LSTM] Failed to load checkpoint for {ticker}: {e}. Will retrain.")
         return None, None
 
 
@@ -371,11 +383,11 @@ def predict_price_movement(ticker: str, market_ctx: dict | None = None) -> dict:
         if len(features_df) < LOOKBACK + 20:
             return FAIL_SAFE
 
-        # ── 4. Load or train model ───────────────────────────────────────
-        model, scaler = _load_model()
+        # ── 4. Load or train model (per-ticker checkpoint) ───────────────
+        model, scaler = _load_model(ticker)
 
         if model is None:
-            print(f"[LSTM] No v3 checkpoint. Training gated model for {ticker}…")
+            print(f"[LSTM] No v3 checkpoint for {ticker}. Training gated model…")
             scaler          = StandardScaler()
             scaled_features = scaler.fit_transform(features_df.values)
 
@@ -384,7 +396,7 @@ def predict_price_movement(ticker: str, market_ctx: dict | None = None) -> dict:
                 return FAIL_SAFE
 
             model = _train_model(X, y)
-            _save_model(model, scaler)
+            _save_model(model, scaler, ticker)
         else:
             scaled_features = scaler.transform(features_df.values)
 
@@ -394,9 +406,15 @@ def predict_price_movement(ticker: str, market_ctx: dict | None = None) -> dict:
 
         model.eval()
         with torch.no_grad():
-            # Compute gate weights for logging (diagnostic)
+            # Gate weights are logged as a DIAGNOSTIC only. The gate module is
+            # never trained against market context (training always passes
+            # market_ctx=None → uniform 0.5 gates), so its ctx-driven weights
+            # are random initialization. Applying them at inference created
+            # train/serve skew — predict under the same uniform gating the
+            # model was trained with. Enabling the gate for real requires
+            # training with per-sample historical market context first.
             gate_w   = model.market_gate(ctx_tensor).squeeze(0).tolist()  # (5,)
-            raw_pred = model(last_tensor, market_ctx=ctx_tensor).item()
+            raw_pred = model(last_tensor, market_ctx=None).item()
 
         predicted_return = float(raw_pred)
         is_bullish       = predicted_return > 0.0

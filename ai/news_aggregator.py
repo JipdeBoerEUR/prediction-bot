@@ -16,6 +16,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 
 import feedparser
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,16 @@ def _fetch_feed(feed: Dict[str, str], lookback_hours: int = 6) -> List[Dict]:
     headlines = []
 
     try:
-        parsed = feedparser.parse(feed["url"])
+        # feedparser.parse(url) has NO network timeout — one hung RSS host
+        # would stall the topic scout (and the whole scan) indefinitely.
+        # Fetch with requests (bounded) and parse the bytes instead.
+        resp = requests.get(
+            feed["url"],
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0 (prediction-bot RSS reader)"},
+        )
+        resp.raise_for_status()
+        parsed = feedparser.parse(resp.content)
         for entry in parsed.entries:
             title = _clean_title(getattr(entry, "title", ""))
             if not title or len(title) < 15:
