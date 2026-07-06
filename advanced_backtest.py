@@ -6,7 +6,6 @@ across 5 years of historical data for multiple tickers, and benchmarks it agains
 
 import yfinance as yf
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 import warnings
 
@@ -82,29 +81,44 @@ def run_deep_backtest():
                 # Active Position Management
                 if in_position:
                     days_held = (date - entry_date).days
-                    strategy_return = (current_price - entry_price) / entry_price
-                    
-                    # Exit Triggers:
-                    hit_tp = strategy_return >= TAKE_PROFIT_PCT
-                    hit_sl = strategy_return <= -STOP_LOSS_PCT
-                    hit_time = days_held >= HOLD_PERIOD_DAYS
-                    
-                    if hit_tp or hit_sl or hit_time:
+                    bar_open  = float(df['Open'].iloc[i])
+                    bar_high  = float(df['High'].iloc[i])
+                    bar_low   = float(df['Low'].iloc[i])
+
+                    stop_price   = entry_price * (1.0 - STOP_LOSS_PCT)
+                    target_price = entry_price * (1.0 + TAKE_PROFIT_PCT)
+
+                    # Intraday-aware exits (checking only closes ignored every
+                    # intraday breach and overstated results). Conservative
+                    # ordering: if both levels are touched in the same bar,
+                    # assume the stop hit first. Gap opens fill at the open,
+                    # not at the level.
+                    exit_price = None
+                    exit_reason = None
+                    if bar_low <= stop_price:
+                        exit_price = min(bar_open, stop_price)
+                        exit_reason = "STOP_LOSS"
+                    elif bar_high >= target_price:
+                        exit_price = max(bar_open, target_price)  # limit fills at target or better
+                        exit_reason = "TAKE_PROFIT"
+                    elif days_held >= HOLD_PERIOD_DAYS:
                         exit_price = current_price
-                        
+                        exit_reason = "TIME_LIMIT"
+
+                    if exit_price is not None:
+                        strategy_return = (exit_price - entry_price) / entry_price
+
                         # Calculate Alpha against S&P 500 in the exact same window
                         bench_entry = benchmark_df[benchmark_df.index <= entry_date].iloc[-1]
                         bench_exit = benchmark_df[benchmark_df.index <= date].iloc[-1]
-                        
+
                         # Ensure we get scalar floats
                         if isinstance(bench_entry, pd.Series): bench_entry = float(bench_entry.iloc[0])
                         if isinstance(bench_exit, pd.Series): bench_exit = float(bench_exit.iloc[0])
 
                         sp500_return = (bench_exit - bench_entry) / bench_entry
                         alpha = strategy_return - sp500_return
-                        
-                        exit_reason = "TAKE_PROFIT" if hit_tp else "STOP_LOSS" if hit_sl else "TIME_LIMIT"
-                        
+
                         all_trade_results.append({
                             'Ticker': ticker,
                             'Entry_Date': entry_date,
@@ -115,16 +129,18 @@ def run_deep_backtest():
                             'SP500_Return': float(sp500_return),
                             'Alpha': float(alpha)
                         })
-                        
+
                         in_position = False
                         entry_price = 0.0
                         entry_date = None
-                        
-                # Entry Logic
-                elif df['Buy_Signal'].iloc[i]:
+
+                # Entry Logic — the signal is only known after bar i closes,
+                # so enter at the NEXT bar's open. Entering at the very close
+                # that generated the signal was look-ahead bias.
+                elif df['Buy_Signal'].iloc[i] and i + 1 < len(df):
                     in_position = True
-                    entry_price = current_price
-                    entry_date = date
+                    entry_price = float(df['Open'].iloc[i + 1])
+                    entry_date = df.index[i + 1]
                     
         except Exception as e:
             print(f"[ERROR] Failed to simulate {ticker}: {e}")

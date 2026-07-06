@@ -15,7 +15,7 @@ ALPACA_SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY", "your_paper_secret_key")
 ALPACA_BASE_URL = "https://paper-api.alpaca.markets"
 
 def execute_trade(ticker: str, shares: int):
-    print(f"--- Paper Trading Execution ---")
+    print("--- Paper Trading Execution ---")
     print(f"Attempting to buy {shares} shares of {ticker}...")
     
     if not tradeapi:

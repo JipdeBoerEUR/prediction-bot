@@ -1,7 +1,5 @@
 import yfinance as yf
 from transformers import pipeline
-import requests
-import re
 import warnings
 
 warnings.filterwarnings("ignore")

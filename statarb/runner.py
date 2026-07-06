@@ -39,7 +39,6 @@ def run_statarb_scan():
     try:
         # These imports happen inside the function so they use the modified sys.path
         # and resolve `import config` to statarb/config.py
-        import importlib
         if "config" in sys.modules:
             # Remove any previously cached 'config' module from the insider bot
             del sys.modules["config"]
@@ -55,7 +54,6 @@ def run_statarb_scan():
         import numpy as np
         import pandas as pd
         from datetime import date
-        from pathlib import Path
 
         paper = bool(getattr(cfg, "PAPER", True))
         dry_run = bool(getattr(cfg, "DRY_RUN", False))
@@ -175,7 +173,7 @@ def run_statarb_scan():
                 print("[STAT-ARB] No orders to submit today.")
                 continue
 
-            print(f"\n[STAT-ARB] Orders to submit:")
+            print("\n[STAT-ARB] Orders to submit:")
             print(all_orders.to_string(index=False))
 
             report = trader.execute_trades(

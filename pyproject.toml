@@ -1,0 +1,22 @@
+[tool.ruff]
+# The codebase uses intentional column alignment and long descriptive lines,
+# so line-length is not enforced. Focus ruff on real correctness signals.
+line-length = 120
+target-version = "py311"
+extend-exclude = ["chroma_db", "models", ".claude-flow"]
+
+[tool.ruff.lint]
+# E9  = syntax errors
+# F   = pyflakes (undefined names, unused imports/vars, duplicate keys, f-strings)
+# B   = flake8-bugbear (likely bugs: mutable defaults, bare except pitfalls, etc.)
+# PLE = pylint errors (definite errors only)
+select = ["E9", "F", "B", "PLE"]
+ignore = [
+    "E501",   # line length — code uses deliberate alignment
+    "B008",   # function call in default arg — used intentionally in a few places
+    "F841",   # unused local — several are defensive placeholders; review case-by-case
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Package __init__ files re-export symbols via imports.
+"**/__init__.py" = ["F401"]

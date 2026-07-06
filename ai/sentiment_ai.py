@@ -1,6 +1,5 @@
 import yfinance as yf
 from transformers import pipeline
-import torch
 
 # Initialize the FinBERT sentiment analysis pipeline
 # This will download the model (~400MB) on the first run
@@ -18,8 +17,20 @@ def analyze_sentiment(ticker: str, num_headlines: int = 5) -> dict:
         
         if not news:
             return {"is_passed": True, "score": 0.0, "reason": "No news found for ticker."}
-        
-        headlines = [row['title'] for row in news[:num_headlines]]
+
+        # yfinance changed its news schema: items are now
+        # {"id": ..., "content": {"title": ...}} instead of {"title": ...}.
+        # Support both — the old flat access KeyError'd on every item, which
+        # the except below turned into a blanket trade rejection.
+        headlines = []
+        for row in news[:num_headlines]:
+            title = (row.get("content") or {}).get("title") or row.get("title") or ""
+            if title.strip():
+                headlines.append(title.strip())
+
+        if not headlines:
+            return {"is_passed": True, "score": 0.0,
+                    "reason": "News present but no parseable headlines (schema change?)."}
         results = sentiment_pipe(headlines)
         
         # Map labels to scores: positive=1, neutral=0, negative=-1

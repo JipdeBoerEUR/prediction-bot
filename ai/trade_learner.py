@@ -32,6 +32,14 @@ class TradeLearner:
             return "No history file found."
 
         df = pd.read_csv(self.history_file)
+
+        # trade_history.csv also contains "NO TRADE" rejection rows written by
+        # log_evaluation() — those are gate decisions, not trades, and labeling
+        # them by subsequent price movement would teach the model nonsense.
+        if 'Signal' in df.columns:
+            df = df[~df['Signal'].astype(str).str.strip().str.upper().eq('NO TRADE')]
+            df = df.reset_index(drop=True)
+
         if len(df) < 5:
             return "Insufficient data for training."
 
