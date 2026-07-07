@@ -180,11 +180,12 @@ def _compute_regime_health(window_returns: pd.DataFrame) -> float:
 
 
 def _degrees_from_W(W: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
-    # degree = number of nonzero edges; weighted degree = sum of weights
-    w = W.copy()
-    np.fill_diagonal(w.values, 0.0)
-    deg = (w > 0).sum(axis=1).astype(float)
-    wdeg = w.sum(axis=1).astype(float)
+    # degree = number of nonzero edges; weighted degree = sum of weights.
+    # Work on an owned numpy copy — pandas 3 CoW makes .values read-only.
+    w = W.to_numpy(copy=True)
+    np.fill_diagonal(w, 0.0)
+    deg = pd.Series((w > 0).sum(axis=1), index=W.index, dtype=float)
+    wdeg = pd.Series(w.sum(axis=1), index=W.index, dtype=float)
     return deg, wdeg
 
 

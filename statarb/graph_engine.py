@@ -743,9 +743,12 @@ class MarketGraph:
         
         # Compute correlation matrix (vectorized)
         corr = window.corr()
-        
-        # Remove self-loops
-        np.fill_diagonal(corr.values, 0.0)
+
+        # Remove self-loops. pandas 3 copy-on-write makes .values read-only,
+        # so zero the diagonal on an owned numpy copy.
+        corr_vals = corr.to_numpy(copy=True)
+        np.fill_diagonal(corr_vals, 0.0)
+        corr = pd.DataFrame(corr_vals, index=corr.index, columns=corr.columns)
         
         # Apply sector mask if requested
         if sector_only:
@@ -755,12 +758,10 @@ class MarketGraph:
             if verbose:
                 print("  ✓ Applied sector mask (edges only within same sector)")
         
-        # Threshold filter (removes weak correlations AND negative correlations)
+        # Threshold filter (removes weak correlations AND negative correlations).
+        # Diagonal is already 0 and 0 < threshold keeps it 0 through the filter.
         W = corr.where(corr >= threshold, 0.0)
-        
-        # Ensure diagonal is exactly 0
-        np.fill_diagonal(W.values, 0.0)
-        
+
         # Enforce symmetry (critical for undirected graph)
         W = (W + W.T) / 2.0
         

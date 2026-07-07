@@ -20,7 +20,7 @@ import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -54,7 +54,7 @@ from news_scanner       import scan_news
 from notifier           import send_trade_alert, send_statarb_alert
 from logger             import log_evaluation
 from portfolio_monitor  import evaluate_portfolio, monitor_live_positions
-from trade_utils        import is_sell_side
+from trade_utils        import is_sell_side, vol_scaled_stop_pct
 from position_ledger    import record_position, remove_position, load_ledger as load_position_ledger
 
 # Retired → kept on disk for reference:
@@ -77,6 +77,7 @@ _ENTRY_Z         = cfg.ENGINES["equities"].get("entry_z", cfg.ENTRY_Z)
 _MODEL_PATH      = cfg.ENGINES["equities"]["model_path"]
 _MIN_QTY             = 0.001 if getattr(cfg, "FORCE_FRACTIONAL_SHARES", True) else 1
 _MAX_POSITIONS_PER_SCAN = 5       # hard cap on new positions opened in a single scan
+_EARNINGS_BLACKOUT_DAYS = 3       # skip entries this close to a known earnings date
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -220,7 +221,10 @@ def _get_topic_engine() -> TopicEngine:
 # Layer 2 \u2014 Dual Scouts
 # \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 
-async def scout_topic_candidates(ctx: OrchestratorContext) -> List[dict]:
+async def scout_topic_candidates(
+    ctx: OrchestratorContext,
+    lookback_hours: Optional[int] = None,
+) -> List[dict]:
     """Engine A (PRIMARY) \u2014 BERTopic news topic discovery."""
     global _prior_headlines
 
@@ -230,10 +234,14 @@ async def scout_topic_candidates(ctx: OrchestratorContext) -> List[dict]:
 
     print("\n[SCOUT-A] Topical Trading Scout \u2014 aggregating headlines\u2026")
 
+    # Per-scan override: the morning scan passes a wider window so overnight
+    # and pre-market news is seen; the afternoon scan uses the config default.
+    lb_hours = lookback_hours or tcfg.get("topic_lookback_hours", 6)
+
     try:
         headlines = await loop.run_in_executor(
             _executor,
-            lambda: aggregate_headlines(lookback_hours=tcfg.get("topic_lookback_hours", 6)),
+            lambda: aggregate_headlines(lookback_hours=lb_hours),
         )
     except Exception as e:
         print(f"[SCOUT-A] Headline aggregation failed: {e}")
@@ -357,10 +365,13 @@ async def scout_statarb_candidates(ctx: OrchestratorContext) -> List[dict]:
         return []
 
 
-async def run_dual_scouts(ctx: OrchestratorContext) -> Tuple[List[dict], List[dict]]:
+async def run_dual_scouts(
+    ctx: OrchestratorContext,
+    headline_lookback_hours: Optional[int] = None,
+) -> Tuple[List[dict], List[dict]]:
     """asyncio.gather both scouts — they run fully concurrently."""
     topic_raws, statarb_raws = await asyncio.gather(
-        scout_topic_candidates(ctx),
+        scout_topic_candidates(ctx, lookback_hours=headline_lookback_hours),
         scout_statarb_candidates(ctx),
     )
     return topic_raws, statarb_raws
@@ -656,6 +667,49 @@ async def build_unified_candidates(
 # Layer 4 — Unified AI Audit
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _earnings_blackout(ticker: str, days: int = _EARNINGS_BLACKOUT_DAYS) -> bool:
+    """True if a known earnings date falls within the next `days` calendar days.
+
+    A 5-day directional forecast entered right before earnings is a coin flip
+    on the gap, not a signal-driven trade — so entries are vetoed near known
+    report dates.
+
+    Veto-gate semantics (deliberately different from the fail-closed
+    confirmation gates): if the calendar cannot be fetched or parsed, return
+    False and let the trade proceed. Absence of calendar data is not evidence
+    of event risk, and blocking the whole strategy on a flaky metadata
+    endpoint would be a false-positive kill switch.
+    """
+    try:
+        cal = yf.Ticker(ticker).calendar
+        if cal is None:
+            return False
+        raw = None
+        if isinstance(cal, dict):
+            raw = cal.get("Earnings Date")
+        elif hasattr(cal, "loc"):   # older yfinance returned a DataFrame
+            try:
+                raw = list(cal.loc["Earnings Date"])
+            except Exception:
+                return False
+        if raw is None:
+            return False
+        if not isinstance(raw, (list, tuple)):
+            raw = [raw]
+        today = datetime.now().date()
+        horizon = today + timedelta(days=days)
+        for d in raw:
+            try:
+                d = pd.Timestamp(d).date()
+            except Exception:
+                continue
+            if today <= d <= horizon:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 async def audit_candidate_ai(
     candidate:  UnifiedCandidate,
     market_ctx: dict | None = None,
@@ -683,6 +737,17 @@ async def audit_candidate_ai(
     ticker = candidate.ticker
     is_topic   = candidate.source == "topic"
     is_statarb = candidate.source == "statarb"
+
+    # ── Gate 0: earnings blackout (cheap; runs before the expensive gates) ───
+    try:
+        in_blackout = await loop.run_in_executor(_executor, _earnings_blackout, ticker)
+    except Exception:
+        in_blackout = False
+    if in_blackout:
+        candidate.skip        = True
+        candidate.skip_reason = f"Earnings within {_EARNINGS_BLACKOUT_DAYS}d (blackout)"
+        print(f"  [AI] {ticker} SKIPPED — earnings within {_EARNINGS_BLACKOUT_DAYS} days.")
+        return candidate
 
     # ── Gate 1: Headline sentiment pre-filter ────────────────────────────────
     # Topic candidates: use BERTopic-computed FinBERT sentiment (already scored).
@@ -1272,7 +1337,10 @@ def run_statarb_exits(ctx: OrchestratorContext) -> None:
         print(f"[STATARB-EXIT] Execution error: {e}")
 
 
-async def _run_unified_scan_async(ctx: OrchestratorContext) -> None:
+async def _run_unified_scan_async(
+    ctx: OrchestratorContext,
+    headline_lookback_hours: Optional[int] = None,
+) -> None:
     """Full async pipeline for one scan cycle."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{'='*60}\n=== UNIFIED SCAN | {ts} ===\n{'='*60}")
@@ -1291,7 +1359,9 @@ async def _run_unified_scan_async(ctx: OrchestratorContext) -> None:
     print(f"\n[INFO] Account equity: ${ctx.account_equity:.2f}")
 
     # [2] Dual Scouts
-    insider_raws, statarb_raws = await run_dual_scouts(ctx)
+    insider_raws, statarb_raws = await run_dual_scouts(
+        ctx, headline_lookback_hours=headline_lookback_hours
+    )
     print(f"\n[SCOUTS] Insider OK: {len(insider_raws)} | StatArb OK: {len(statarb_raws)}")
 
     if not insider_raws and not statarb_raws:
@@ -1350,14 +1420,30 @@ async def _run_unified_scan_async(ctx: OrchestratorContext) -> None:
               f"({ctx.positions_this_scan} new position(s))")
 
     # Record which strategy opened each submitted position so the statarb
-    # exit pass and the SL/TP monitor can tell the books apart.
+    # exit pass and the SL/TP monitor can tell the books apart — plus the
+    # volatility-scaled exit parameters computed from the candidate's own
+    # daily sigma (fixed thresholds treat a staples stock and a chip stock
+    # identically; see trade_utils.vol_scaled_stop_pct).
     if report is not None:
         for rec in report.details:
             if rec.get("status") in {"submitted", "dry_run"}:
                 c = candidates_map.get(rec.get("ticker", ""))
                 if c is not None:
                     try:
-                        record_position(c.ticker, c.source, c.side)
+                        sigma = (float(c.asset_vol)
+                                 if math.isfinite(c.asset_vol) and c.asset_vol > 0
+                                 else None)
+                        stop_pct = vol_scaled_stop_pct(sigma) if sigma else None
+                        record_position(
+                            c.ticker, c.source, c.side,
+                            entry_price = float(c.price) if c.price > 0 else None,
+                            stop_pct    = stop_pct,
+                            # Trailing distance = stop distance (3σ): winners
+                            # run until they give back one stop-width from
+                            # their peak, instead of being capped at +15%.
+                            trail_pct   = stop_pct,
+                            opened_at   = datetime.now().strftime("%Y-%m-%d"),
+                        )
                     except Exception as e:
                         print(f"[LEDGER] Could not record {c.ticker}: {e}")
 
@@ -1367,9 +1453,12 @@ async def _run_unified_scan_async(ctx: OrchestratorContext) -> None:
     print(f"\n=== SCAN COMPLETE | {datetime.now().strftime('%H:%M:%S')} ===\n")
 
 
-def run_unified_scan(ctx: OrchestratorContext) -> None:
+def run_unified_scan(
+    ctx: OrchestratorContext,
+    headline_lookback_hours: Optional[int] = None,
+) -> None:
     """Synchronous wrapper — each call gets its own event loop."""
-    asyncio.run(_run_unified_scan_async(ctx))
+    asyncio.run(_run_unified_scan_async(ctx, headline_lookback_hours))
 
 
 def run_portfolio_monitor(ctx: OrchestratorContext) -> None:
@@ -1443,6 +1532,16 @@ def main() -> None:
         else:
             print("[SCHED] Outside market hours — scan skipped.")
 
+    def _guarded_scan_am() -> None:
+        # Morning scan with a wide headline window: the afternoon scan's 6h
+        # lookback never sees news published between ~21:30 and 09:30, which
+        # is exactly when earnings reports and overnight catalysts land. 18h
+        # covers everything since the previous afternoon scan.
+        if _is_market_hours():
+            run_unified_scan(ctx, headline_lookback_hours=18)
+        else:
+            print("[SCHED] Outside market hours — morning scan skipped.")
+
     def _guarded_monitor() -> None:
         if _is_market_hours():
             run_portfolio_monitor(ctx)
@@ -1454,13 +1553,14 @@ def main() -> None:
     scheduler = BackgroundScheduler(
         job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 120}
     )
+    scheduler.add_job(_guarded_scan_am,        CronTrigger(hour=9,  minute=40, timezone="America/New_York"),  id="unified_scan_am")
     scheduler.add_job(_guarded_scan,           CronTrigger(hour=15, minute=30, timezone="America/New_York"),  id="unified_scan")
     scheduler.add_job(_guarded_monitor,        IntervalTrigger(minutes=15),  id="portfolio_monitor")
     scheduler.add_job(_guarded_statarb_exits,  IntervalTrigger(minutes=30),  id="statarb_exits")
     scheduler.start()
 
-    print("\n[DAEMON] Active. Unified scan at 3:30 PM ET | Portfolio monitor every 15 min "
-          "| StatArb exits every 30 min.")
+    print("\n[DAEMON] Active. Unified scans at 9:40 AM + 3:30 PM ET | "
+          "Portfolio monitor every 15 min | StatArb exits every 30 min.")
     print("[DAEMON] Press Ctrl+C to stop.\n")
 
     try:

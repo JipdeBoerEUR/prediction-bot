@@ -164,11 +164,65 @@ This downloads ~5 years of hourly OHLCV data and trains the gradient-boosted cla
 
 ## Backtesting
 
+### Walk-forward simulation of the real pipeline
+
+```bash
+python backtest_walkforward.py                    # 2019 → today, vol-scaled exits
+python backtest_walkforward.py --exits fixed      # A/B: legacy fixed -7%/+15% exits
+python backtest_walkforward.py --dollar-neutral   # add the short book
+```
+
+`backtest_walkforward.py` replays the **actual production signal path** day by
+day: trailing-window correlation graph → Laplacian diffusion residuals (the
+same `statarb.sim_engine` solver the live engine uses) → residual z-score
+entries filled at the *next bar's open* → exits through the *same*
+`trade_utils.check_position_exit` function the live monitor calls. Regime
+gate (SPY 200-DMA / VIX), per-side transaction costs, and intraday High/Low
+stop checks with pessimistic ordering are all modeled. Outputs
+`BACKTEST_REPORT.md` (in-sample vs out-of-sample vs SPY metrics table) and
+`backtest_report.png` (equity + drawdown chart). Price data is cached in
+`bt_cache/` so reruns are instant.
+
+Honest scope note: the topic (news momentum) sleeve is **not** simulated —
+no historical archive of the RSS headline stream exists, and synthesizing one
+would be fiction. The report says so explicitly.
+
+### Legacy event study
+
 ```bash
 python backtest.py
 ```
 
-The backtester replays historical signals through the full pipeline (regime filter, risk sizing, execution costs) and outputs Sharpe ratio, max drawdown, win rate, and P&L curve.
+The original event-study backtester replays historical signals through the regime filter, risk sizing and execution costs and reports Sharpe, max drawdown, win rate and a P&L curve.
+
+---
+
+## Exit Engineering
+
+Exits are where most of the expectancy lives, so they are volatility-aware
+and unit-tested (`tests/test_exit_logic.py`):
+
+- **σ-scaled stops** — the stop distance is `3×σ_daily` (clamped 4–15%),
+  computed per position at entry. A fixed −7% stop is ~3σ for a staples stock
+  but ~1σ for a high-beta chip name; scaling normalizes exit behavior across
+  the universe. (`trade_utils.vol_scaled_stop_pct`)
+- **Trailing stops instead of profit caps** — winners run until they give
+  back one stop-width from their peak (high-water mark persisted in
+  `bot_positions.json`, so it survives restarts) rather than being amputated
+  at +15%.
+- **Time decay exits** — a topic-momentum position that has gone nowhere in
+  10 trading days is a dead thesis occupying a scarce position slot; it gets
+  recycled.
+- **Earnings blackout** — no entries within 3 days of a known earnings date:
+  a 5-day directional forecast into an earnings gap is a coin flip, not a
+  signal.
+- **Strategy-aware exit routing** — a persistent position ledger records
+  which strategy opened each position, so the statarb mean-reversion exit
+  never force-sells a topic-momentum winner, and shorts are covered on
+  residual reversal.
+
+The same exit code runs in the live monitor and the walk-forward backtester,
+so the A/B flag (`--exits vol|fixed`) measures exactly what production would do.
 
 ---
 

@@ -14,10 +14,16 @@ __pycache__/
 # Local state — never overwrite on Home PC during git pull
 portfolio.json
 trade_history.csv
+bot_positions.json
 statarb/config.py
 stop.txt
 data/
 logs/
+
+# Backtest cache + generated reports
+bt_cache/
+backtest_report.png
+BACKTEST_REPORT.md
 
 # Optuna study DB (large binary)
 optuna.db

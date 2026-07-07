@@ -73,3 +73,40 @@ def test_non_dict_json_returns_empty(tmp_path):
     with open(p, "w", encoding="utf-8") as f:
         json.dump(["a", "list"], f)
     assert load_ledger(p) == {}
+
+
+def test_record_with_exit_fields(tmp_path):
+    p = _path(tmp_path)
+    record_position("NVDA", "topic", 1, path=p,
+                    entry_price=450.5, stop_pct=0.09, trail_pct=0.09,
+                    opened_at="2026-07-06")
+    entry = load_ledger(p)["NVDA"]
+    assert entry["entry_price"] == 450.5
+    assert entry["stop_pct"] == 0.09
+    assert entry["opened_at"] == "2026-07-06"
+
+
+def test_record_drops_none_fields(tmp_path):
+    p = _path(tmp_path)
+    record_position("KO", "topic", 1, path=p, entry_price=60.0, stop_pct=None)
+    entry = load_ledger(p)["KO"]
+    assert "stop_pct" not in entry
+    assert entry["entry_price"] == 60.0
+
+
+def test_update_position_merges(tmp_path):
+    from position_ledger import update_position
+    p = _path(tmp_path)
+    record_position("AAPL", "statarb", -1, path=p, entry_price=200.0)
+    update_position("AAPL", path=p, extreme_price=185.0)
+    entry = load_ledger(p)["AAPL"]
+    assert entry["source"] == "statarb"          # untouched
+    assert entry["entry_price"] == 200.0         # untouched
+    assert entry["extreme_price"] == 185.0       # merged
+
+
+def test_update_position_creates_bare_entry(tmp_path):
+    from position_ledger import update_position
+    p = _path(tmp_path)
+    update_position("MSFT", path=p, extreme_price=500.0)
+    assert load_ledger(p)["MSFT"] == {"extreme_price": 500.0}
