@@ -85,15 +85,19 @@ def build_adjacency_from_returns(
         )
 
     corr = window_returns.corr()
-    np.fill_diagonal(corr.values, 0.0)
+    # pandas 3 copy-on-write makes .values read-only — zero the diagonal on an
+    # owned numpy copy instead of mutating the DataFrame's buffer.
+    vals = corr.to_numpy(copy=True)
+    np.fill_diagonal(vals, 0.0)
+    corr = pd.DataFrame(vals, index=corr.index, columns=corr.columns)
 
     if sector_only and sectors is not None:
         s = sectors.reindex(corr.columns).fillna("Unknown")
         M = _sector_mask(s)
         corr = corr * M
 
+    # Diagonal is already 0 and 0 < threshold keeps it 0 through the filter.
     W = corr.where(corr >= threshold, 0.0)
-    np.fill_diagonal(W.values, 0.0)
     W = (W + W.T) / 2.0  # enforce exact symmetry
     return W.clip(lower=0.0)
 
@@ -257,7 +261,7 @@ def compute_degree_panel(
             sector_only=sector_only,
             threshold=graph_threshold,
         )
-        Wv = W.to_numpy()
+        Wv = W.to_numpy(copy=True)   # owned copy: to_numpy() views are read-only under CoW
         np.fill_diagonal(Wv, 0.0)
         deg = (Wv > 0).sum(axis=1).astype(float)
         row = pd.Series(np.nan, index=returns.columns)

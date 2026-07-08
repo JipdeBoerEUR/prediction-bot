@@ -46,10 +46,33 @@ def _save(ledger: Dict[str, dict], path: str = LEDGER_PATH) -> None:
 
 
 def record_position(ticker: str, source: str, side: int,
-                    path: str = LEDGER_PATH) -> None:
-    """Record (or update) the strategy that opened a position."""
+                    path: str = LEDGER_PATH, **fields) -> None:
+    """Record (or replace) a position entry.
+
+    Extra keyword fields are stored alongside source/side — the monitor uses
+    entry_price, stop_pct, trail_pct, opened_at and extreme_price. None-valued
+    fields are dropped so absent data reads back as absent, not null.
+    """
     ledger = load_ledger(path)
-    ledger[str(ticker).upper()] = {"source": str(source), "side": int(side)}
+    entry = {"source": str(source), "side": int(side)}
+    entry.update({k: v for k, v in fields.items() if v is not None})
+    ledger[str(ticker).upper()] = entry
+    _save(ledger, path)
+
+
+def update_position(ticker: str, path: str = LEDGER_PATH, **fields) -> None:
+    """Merge fields into an existing entry (create a bare one if missing).
+
+    Used by the monitor to persist the trailing-stop extreme price across
+    restarts without touching the rest of the entry.
+    """
+    ledger = load_ledger(path)
+    key = str(ticker).upper()
+    entry = ledger.get(key)
+    if not isinstance(entry, dict):
+        entry = {}
+    entry.update({k: v for k, v in fields.items() if v is not None})
+    ledger[key] = entry
     _save(ledger, path)
 
 
