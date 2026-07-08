@@ -38,8 +38,13 @@ networkx==3.6.1
 
 # --- Trading Execution (Alpaca) -----------------------------------------------
 alpaca-py==0.43.2
-# Legacy REST client (imported optionally in statarb/execution.py)
-alpaca-trade-api>=3.2.0
+# NOTE: the legacy root-level execution.py optionally imports alpaca-trade-api,
+# but that file is retired (superseded by statarb/execution.ExecutionEngine,
+# see main.py) and its import is already wrapped in try/except ImportError.
+# alpaca-trade-api 3.2.0 pins websockets<11, which conflicts with yfinance /
+# google-genai / alpaca-py's websockets>=13 requirement — so it is deliberately
+# NOT listed here. Uncomment only if you still use the legacy execution.py:
+# alpaca-trade-api>=3.2.0
 
 # --- SEC Filings (EDGAR) ------------------------------------------------------
 edgartools>=2.0
