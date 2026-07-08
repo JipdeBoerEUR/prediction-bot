@@ -23,6 +23,7 @@ This dataset is designed to be consumed by brain_engine.BrainEngine.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -30,6 +31,17 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+# This file lives inside statarb/, but imports statarb as an absolute package
+# (below) so it can be run as `python statarb/dataset_builder_v2.py` per the
+# README. Running a script directly puts its OWN directory on sys.path, not
+# its parent — so `from statarb import config` can't find the statarb package
+# from inside statarb/ itself without this. (Running as `python -m
+# statarb.dataset_builder_v2` from the repo root works without this too, since
+# -m puts the current working directory on the path instead.)
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from statarb import config as cfg
 from statarb import sim_engine as sim
