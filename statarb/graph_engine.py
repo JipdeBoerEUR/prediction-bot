@@ -14,6 +14,7 @@ Author: Senior Quantitative Developer Team
 """
 
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 import warnings
@@ -154,11 +155,20 @@ def _alpaca_fetch_close_prices(
     feed: Optional[str],
     max_retries: int = 5,
     verbose: bool = True,
+    max_workers: int = 8,
 ) -> pd.DataFrame:
     """
     Fetch close prices from Alpaca using *per-symbol* requests to avoid API truncation
     when requesting many symbols at once (limit applies per response and you must paginate
     using next_page_token otherwise).
+
+    Symbols are fetched concurrently (max_workers threads) — this is network-bound
+    (waiting on HTTP responses), not CPU-bound, so threading gives a large speedup
+    even on machines whose cores otherwise sit idle during a sequential fetch. A
+    failing symbol's retry backoff (time.sleep below) no longer blocks every other
+    symbol behind it in line. max_workers is deliberately modest by default to stay
+    well under Alpaca's per-account rate limits — raise it only if you know your
+    account's limit comfortably allows more concurrent requests.
     """
     # Local imports (optional dependency)
     import os
@@ -233,11 +243,10 @@ def _alpaca_fetch_close_prices(
             f"Underlying error: {type(e).__name__}: {e}"
         ) from e
 
-    series_list: List[pd.Series] = []
-    failed: set[str] = set()
-    error_samples: Dict[str, str] = {}
-
-    for sym in tickers:
+    def _fetch_one(sym: str) -> Tuple[str, Optional[pd.Series], Optional[str]]:
+        """Fetch + paginate one symbol. Own client instance — cheap to build,
+        avoids any doubt about concurrent use of a shared HTTP session."""
+        thread_client = StockHistoricalDataClient(key_id, secret)
         page_token = None
         parts: List[pd.Series] = []
         sym_error: Optional[str] = None
@@ -252,9 +261,10 @@ def _alpaca_fetch_close_prices(
                 page_token=page_token,
             )
             last_err: Optional[Exception] = None
+            df = None
             for attempt in range(max_retries):
                 try:
-                    resp = client.get_stock_bars(req)
+                    resp = thread_client.get_stock_bars(req)
                     df = getattr(resp, "df", None)
                     if df is None or len(df) == 0:
                         break
@@ -279,9 +289,7 @@ def _alpaca_fetch_close_prices(
             else:
                 # retries exhausted
                 if last_err:
-                    failed.add(sym)
-                    if sym not in error_samples:
-                        error_samples[sym] = f"{type(last_err).__name__}: {last_err}"
+                    return sym, None, f"{type(last_err).__name__}: {last_err}"
                 break
 
             if df is None or len(df) == 0:
@@ -290,15 +298,32 @@ def _alpaca_fetch_close_prices(
                 break
 
         if len(parts) == 0:
-            failed.add(sym)
-            if sym_error and sym not in error_samples:
-                error_samples[sym] = sym_error
-            continue
+            return sym, None, sym_error
 
         s_all = pd.concat(parts).sort_index()
         # De-duplicate timestamps (keep last)
         s_all = s_all[~s_all.index.duplicated(keep="last")]
-        series_list.append(s_all)
+        return sym, s_all, None
+
+    series_list: List[pd.Series] = []
+    failed: set[str] = set()
+    error_samples: Dict[str, str] = {}
+
+    workers = max(1, min(int(max_workers), len(tickers)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_fetch_one, sym): sym for sym in tickers}
+        for future in as_completed(futures):
+            sym = futures[future]
+            try:
+                sym_out, series, err = future.result()
+            except Exception as e:
+                sym_out, series, err = sym, None, f"{type(e).__name__}: {e}"
+            if series is not None:
+                series_list.append(series)
+            else:
+                failed.add(sym_out)
+                if err and sym_out not in error_samples:
+                    error_samples[sym_out] = err
 
     if verbose:
         ok = len(series_list)
