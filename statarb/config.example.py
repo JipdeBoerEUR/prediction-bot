@@ -81,12 +81,62 @@ SLIPPAGE_BPS          = 0.0
 SIZING_METHOD         = "mean_variance"
 COV_REGULARIZATION    = 1e-3
 
-# --- Ticker universe (S&P 500) ---
-# Full list lives in statarb/config.py. Add / remove tickers freely.
+# --- Ticker universe (large-cap S&P 500 constituents) ---
+# 306 liquid, well-known large/mega-cap names across all 11 GICS sectors.
+#
+# PROVENANCE / ACCURACY NOTE: compiled from general knowledge, not fetched
+# from a live index-membership feed — I (the assistant that generated this)
+# cannot verify current S&P 500 constituency against an authoritative source
+# from this environment. Index membership changes over time (additions,
+# removals, M&A, spinoffs). Treat this as "a broad, diversified, liquid
+# large-cap universe good enough to build a meaningful correlation graph and
+# run the strategy end-to-end" — not as a guaranteed-current, complete
+# 500-member list. For exact current membership, cross-check against a
+# public source (e.g. a maintained S&P 500 constituents CSV) before relying
+# on this for anything beyond development/backtesting.
+#
+# Add / remove tickers freely — statarb's graph engine only needs a large,
+# liquid, diversified set; exact index membership doesn't have to be perfect.
 EQUITIES_TICKERS = [
-    'AAPL', 'MSFT', 'NVDA', 'AVGO', 'AMD', 'GOOG', 'GOOGL', 'META',
-    'AMZN', 'TSLA', 'JPM', 'BAC', 'WFC', 'V', 'MA',
-    # ... see statarb/config.py for the full 435-ticker S&P 500 list
+    'AAPL', 'ABBV', 'ABNB', 'ADBE', 'AMAT', 'AMD', 'AMGN', 'AMZN',
+    'AVGO', 'AXP', 'BA', 'BAC', 'BKNG', 'BLK', 'BMY', 'C',
+    'CAT', 'CHTR', 'CL', 'CMCSA', 'COF', 'COP', 'COST', 'CRM',
+    'CVS', 'CVX', 'DE', 'DHR', 'DIS', 'DUK', 'F', 'FCX',
+    'GE', 'GILD', 'GM', 'GOOG', 'GOOGL', 'GS', 'HD', 'HON',
+    'INTC', 'ISRG', 'JNJ', 'JPM', 'KMI', 'KO', 'LIN', 'LLY',
+    'LMT', 'LOW', 'LRCX', 'LULU', 'MA', 'MAR', 'MCD', 'META',
+    'MO', 'MPC', 'MRK', 'MS', 'MSFT', 'MU', 'NEE', 'NEM',
+    'NFLX', 'NKE', 'NOW', 'NVDA', 'ORCL', 'OXY', 'PANW', 'PEP',
+    'PFE', 'PG', 'PLTR', 'PM', 'PNC', 'PSX', 'PYPL', 'QCOM',
+    'REGN', 'RTX', 'SBUX', 'SCHW', 'SHW', 'SLB', 'SNOW', 'SO',
+    'T', 'TGT', 'TJX', 'TMO', 'TMUS', 'TSLA', 'UNH', 'UNP',
+    'UPS', 'USB', 'V', 'VLO', 'VRTX', 'VZ', 'WFC', 'WMT',
+    'XOM', 'TXN', 'IBM', 'CSCO', 'ACN', 'INTU', 'KLAC', 'SNPS',
+    'CDNS', 'ADI', 'FTNT', 'ANSS', 'ROP', 'GLW', 'HPQ', 'HPE',
+    'NTAP', 'STX', 'WDC', 'JNPR', 'TER', 'MCHP', 'ON', 'KEYS',
+    'TYL', 'ZBRA', 'GDDY', 'AKAM', 'CDW', 'FFIV', 'EPAM', 'EA',
+    'TTWO', 'WBD', 'OMC', 'IPG', 'MTCH', 'LYV', 'NWSA', 'FOX',
+    'PARA', 'ORLY', 'ROST', 'YUM', 'CMG', 'AZO', 'HLT', 'DHI',
+    'LEN', 'NVR', 'PHM', 'EBAY', 'ETSY', 'RL', 'GRMN', 'POOL',
+    'APTV', 'BBY', 'DPZ', 'WYNN', 'MGM', 'CZR', 'RCL', 'CCL',
+    'NCLH', 'EXPE', 'ULTA', 'TSCO', 'MDLZ', 'KHC', 'GIS', 'KMB',
+    'STZ', 'HSY', 'MKC', 'CHD', 'CLX', 'SYY', 'KR', 'DG',
+    'DLTR', 'ADM', 'TAP', 'TSN', 'EOG', 'WMB', 'OKE', 'HAL',
+    'BKR', 'DVN', 'FANG', 'HES', 'CTRA', 'APA', 'MRO', 'SPGI',
+    'CB', 'PGR', 'MMC', 'AON', 'TFC', 'BK', 'STT', 'MET',
+    'AIG', 'PRU', 'AFL', 'TRV', 'ALL', 'FITB', 'HBAN', 'RF',
+    'CFG', 'KEY', 'MTB', 'NTRS', 'SYF', 'DFS', 'ABT', 'SYK',
+    'BSX', 'ZTS', 'BDX', 'HCA', 'IDXX', 'IQV', 'MRNA', 'WST',
+    'DXCM', 'RMD', 'ALGN', 'CAH', 'MCK', 'COR', 'ELV', 'CI',
+    'HUM', 'MDT', 'ADP', 'CSX', 'NSC', 'ITW', 'EMR', 'ETN',
+    'PH', 'GD', 'NOC', 'WM', 'FDX', 'CMI', 'ROK', 'CTAS',
+    'PCAR', 'IR', 'AME', 'URI', 'PWR', 'FAST', 'DAL', 'LUV',
+    'UAL', 'AAL', 'APD', 'ECL', 'NUE', 'DOW', 'DD', 'PPG',
+    'ALB', 'CTVA', 'LYB', 'IFF', 'PLD', 'AMT', 'EQIX', 'CCI',
+    'PSA', 'O', 'DLR', 'SPG', 'VICI', 'AVB', 'EQR', 'VTR',
+    'ESS', 'MAA', 'UDR', 'D', 'AEP', 'EXC', 'SRE', 'XEL',
+    'ED', 'PEG', 'WEC', 'ES', 'FE', 'ETR', 'AEE', 'PPL',
+    'CMS', 'DTE',
 ]
 
 # --- Engine registry ------------------------------------------------------

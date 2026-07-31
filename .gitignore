@@ -4,6 +4,8 @@ venv/
 .venv/
 __pycache__/
 .hive-mind/
+.pytest_cache/
+.pytest_tmp/
 *.csv
 *.pt
 *.pth
