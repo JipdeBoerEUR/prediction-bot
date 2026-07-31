@@ -39,6 +39,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -562,6 +563,26 @@ def run_optimization(
         compute_n_jobs=compute_n_jobs,
         bounds=bounds,
     )
+
+    # compute_n_jobs=-1 means "use every core" INSIDE each trial's own
+    # residual computation. Combined with parallel_trials > 1 (multiple
+    # trials running at once), that multiplies out to far more threads than
+    # the machine has — e.g. parallel_trials=4 with compute_n_jobs=-1 on a
+    # 16-thread CPU launches up to 64 competing threads, which causes
+    # oversubscription/thrashing (slower, not faster) rather than the extra
+    # throughput you'd expect from more parallelism.
+    cpu_count = os.cpu_count() or 1
+    effective_compute_jobs = cpu_count if compute_n_jobs in (-1, 0) else max(1, compute_n_jobs)
+    total_threads_requested = parallel_trials * effective_compute_jobs
+    if parallel_trials > 1 and total_threads_requested > cpu_count * 1.5:
+        print(
+            f"[optimize] WARNING: parallel_trials={parallel_trials} x "
+            f"compute_n_jobs={compute_n_jobs} (effectively {effective_compute_jobs}/trial) "
+            f"requests ~{total_threads_requested} threads, but this machine has "
+            f"{cpu_count} logical CPUs. This will likely oversubscribe and run SLOWER, "
+            f"not faster. Suggested: keep parallel_trials * compute_n_jobs ≈ {cpu_count} "
+            f"(e.g. --parallel-trials {max(1, cpu_count // 4)} --compute-n-jobs 4)."
+        )
 
     print(
         f"\n[optimize] Starting {n_trials} Optuna trials  (engine={engine}, "
