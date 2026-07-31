@@ -154,11 +154,43 @@ docker run --env-file .env prediction-bot
 ```
 
 ### 4. (Optional) Retrain the Brain Model
-After setup, retrain the stat-arb classifier on the full S&P 500 universe:
+Retraining is two steps — build the labeled event dataset, then fit and save the classifier on it:
 ```bash
-python statarb/dataset_builder_v2.py
+python statarb/dataset_builder_v2.py --engine equities
+python statarb/train_brain.py --engine equities
 ```
-This downloads ~5 years of hourly OHLCV data and trains the gradient-boosted classifier. Takes 15–30 min on first run; cached thereafter.
+`--engine equities` matters: it's the engine key `main.py` actually loads at runtime
+(`cfg.ENGINES["equities"]`). Omitting it silently builds a dataset for an unrelated
+fallback universe.
+
+The first command downloads ~5 years of OHLCV data and writes the labeled event set to
+`data/brain_events_equities.csv` (15–30 min on first run; cached thereafter). The second
+fits a calibrated gradient-boosted classifier on it, reports AUC/Brier on a held-out
+chronological test split, and saves the model to `cfg.ENGINES["equities"]["model_path"]`
+— `main.py` picks it up automatically on next start.
+
+Retrain whenever the signal math changes (e.g. after re-tuning `ENTRY_Z`/`ALPHA`/etc. via
+`optimize_params.py` below) — the model is trained on the specific feature distribution
+those parameters produce, and stays silently stale otherwise.
+
+### 5. (Optional) Re-optimize Strategy Parameters
+
+```bash
+python optimize_params.py --engine equities --n-trials 100
+```
+
+Runs an Optuna search over `entry_z`, `hold_bars`, `graph_threshold`, `lookback_bars`,
+`cost_bps`, `regime_min_health`, `alpha`, `exit_z` and writes the best combination to
+`data/best_params_equities.txt`. **This does not modify `statarb/config.py` for you** —
+open the `.txt` file and copy each value into the matching field by hand:
+
+| `best_params_*.txt` key | Where it goes in `statarb/config.py` |
+|---|---|
+| `ENTRY_Z`, `HOLD_BARS`, `LOOKBACK_BARS`, `COST_BPS`, `REGIME_MIN_HEALTH`, `GRAPH_THRESHOLD`, `EXIT_Z` | the matching top-level constant |
+| `ALPHA` | `ENGINES["equities"]["alpha"]` (there's no top-level `ALPHA` constant — the engine dict entry always takes precedence over `BuildConfig`'s 0.8 default) |
+
+After updating params, re-run step 4 (retrain) — the old model was fit on the old
+parameters' feature distribution and won't reflect the new thresholds.
 
 ---
 

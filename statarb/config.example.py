@@ -89,6 +89,44 @@ EQUITIES_TICKERS = [
     # ... see statarb/config.py for the full 435-ticker S&P 500 list
 ]
 
+# --- Engine registry ------------------------------------------------------
+# main.py hard-requires ENGINES["equities"] (tickers, model_path, and
+# optional per-engine overrides of the strategy parameters above). Without
+# this dict, main.py raises KeyError('ENGINES') on startup — everything below
+# just wires the settings already defined above into the shape main.py and
+# statarb/dataset_builder_v2.py expect. Add more engines (e.g. "forex") by
+# adding more entries here.
+ENGINES = {
+    "equities": {
+        "tickers":      EQUITIES_TICKERS,
+        "model_path":   "models/brain_model_equities.joblib",
+        # Correlation-graph warm-up window (live daily bars, main.py always
+        # fetches interval="1d" for this regardless of INTERVAL below).
+        "start":        "2023-01-01",
+        "end":          None,
+        # Live statarb exit threshold (main.py run_statarb_exits).
+        "sell_thresh":  SELL_THRESH,
+        # Historical dataset-builder settings (statarb/dataset_builder_v2.py).
+        "interval":       INTERVAL,
+        "entry_z":        ENTRY_Z,
+        "hold_bars":      HOLD_BARS,
+        "exec_lag_bars":  EXEC_LAG_BARS,
+        "lookback_bars":  LOOKBACK_BARS,
+        "cost_bps":       COST_BPS,
+        "sector_only":    SECTOR_ONLY,
+        "graph_threshold": GRAPH_THRESHOLD,
+        "regularization": REGULARIZATION,
+        "use_regime_filter":  USE_REGIME_FILTER,
+        "regime_min_health":  REGIME_MIN_HEALTH,
+        # Diffusion coefficient — no top-level ALPHA constant exists yet;
+        # 0.8 is a reasonable starting point but was NOT tuned for this repo.
+        # Re-run optimize_params.py and update this after the diffusion
+        # operator fix (see CRITICAL_ISSUES_ANALYSIS.md / PR history) —
+        # the old tuned value was fit against a different (buggy) operator.
+        "alpha":          0.8,
+    },
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Topical Trading Engine — BERTopic + FinBERT narrative momentum
 # ─────────────────────────────────────────────────────────────────────────────
