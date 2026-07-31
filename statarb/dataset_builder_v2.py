@@ -140,7 +140,17 @@ def _get_engine(engine: str) -> Dict:
     if isinstance(engines, dict) and engine in engines:
         return dict(engines[engine])
 
-    # Fallback: old config style
+    # Fallback: old config style. This is a SILENT degrade — a typo'd --engine
+    # value (e.g. a stray quote character from cmd.exe not stripping quotes
+    # the way bash does) or a missing cfg.ENGINES entry lands here with no
+    # error, quietly building a dataset from a different, usually much
+    # smaller, ticker universe than intended. Warn loudly so that's obvious
+    # immediately instead of discovered later from an oddly small row count.
+    available = sorted(engines.keys()) if isinstance(engines, dict) else []
+    print(f"[dataset_builder_v2] WARNING: engine={engine!r} not found in cfg.ENGINES "
+          f"(available: {available}). Falling back to legacy top-level TICKERS "
+          f"({len(getattr(cfg, 'TICKERS', []))} tickers) — this is almost "
+          f"certainly not what you want. Check for typos in --engine.")
     return {
         "tickers": getattr(cfg, "TICKERS", []),
         "start": getattr(cfg, "DATASET_START", "2018-01-01"),
