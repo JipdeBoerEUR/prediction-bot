@@ -130,15 +130,33 @@ pip install -r requirements.txt
 # Copy the example config
 cp statarb/config.example.py statarb/config.py
 
-# Create your .env (never committed to git)
+# Create your .env (never committed to git) — macOS/Linux
 cat > .env << EOF
 ALPACA_API_KEY=your_alpaca_key
 ALPACA_SECRET_KEY=your_alpaca_secret
-GOOGLE_API_KEY=your_gemini_key       # optional — for RAG risk reports
-TELEGRAM_BOT_TOKEN=your_bot_token   # optional — for trade alerts
-TELEGRAM_CHAT_ID=your_chat_id       # optional
+GEMINI_API_KEY=your_gemini_key           # optional — for RAG risk reports (ai/rag_library.py)
+EDGAR_IDENTITY=you@example.com           # optional — SEC EDGAR API politeness identity
+SENDER_EMAIL=your_email@gmail.com        # optional — trade-alert emails (notifier.py)
+SENDER_PASSWORD=your_gmail_app_password  # optional — Gmail App Password, not your login password
+RECEIVER_EMAIL=your_email@gmail.com      # optional
 EOF
 ```
+```powershell
+# Windows PowerShell — cat/heredoc doesn't work the same way; use Set-Content instead
+Set-Content -Path .env -Value @'
+ALPACA_API_KEY=your_alpaca_key
+ALPACA_SECRET_KEY=your_alpaca_secret
+GEMINI_API_KEY=your_gemini_key
+EDGAR_IDENTITY=you@example.com
+SENDER_EMAIL=your_email@gmail.com
+SENDER_PASSWORD=your_gmail_app_password
+RECEIVER_EMAIL=your_email@gmail.com
+'@
+```
+Only `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` are required to run the bot at all
+(paper trading — get a free key at [alpaca.markets](https://alpaca.markets)).
+Everything else is optional and the corresponding feature just degrades
+gracefully (no RAG reports / no email alerts) if left unset.
 
 Get a free Alpaca paper trading account at [alpaca.markets](https://alpaca.markets).  
 Get a free Gemini API key at [aistudio.google.com](https://aistudio.google.com).
