@@ -593,14 +593,31 @@ def run_optimization(
     for k, (lo, hi) in bounds.items():
         print(f"  - {k}: [{lo}, {hi}]")
 
-    study.optimize(
-        objective,
-        n_trials=n_trials,
-        show_progress_bar=False,
-        n_jobs=parallel_trials,
-    )
+    try:
+        study.optimize(
+            objective,
+            n_trials=n_trials,
+            show_progress_bar=False,
+            n_jobs=parallel_trials,
+        )
+    except KeyboardInterrupt:
+        # Without this, Ctrl+C skipped straight past the results/reporting
+        # code below — every completed trial was safely in `storage` (Optuna
+        # persists each one as it finishes), but the convenient best-trial
+        # summary and best_params_<engine>.txt file were never written,
+        # forcing a full extra run just to see results from what had already
+        # completed. Fall through to the same reporting code instead.
+        n_done = len(study.trials)
+        print(f"\n[optimize] Interrupted — {n_done} trial(s) completed and saved. "
+              f"Reporting best result so far…")
 
     # ── Results ──────────────────────────────────────────────────────────────
+    completed = [t for t in study.trials if t.value is not None]
+    if not completed:
+        print("[optimize] No trials completed yet — nothing to report. "
+              "Re-run with --storage sqlite:///optuna.db to resume.")
+        return
+
     best = study.best_trial
     print("\n" + "=" * 65)
     print("BEST TRIAL")
