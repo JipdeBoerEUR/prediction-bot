@@ -17,6 +17,16 @@ import numpy as np
 import pandas as pd
 
 
+# Known Yahoo data errors, found by listing every >50% one-day move on an
+# index-member day and checking it (see results/REPORT.md "Data"). Prices in
+# [start, end] are blanked (NaN) rather than "corrected" by guesswork.
+BAD_PRICES = {
+    # Fortive spin-off: Yahoo's adjusted DHR history before the ex-date is
+    # mis-scaled, creating a fake +61% day on 2016-07-05.
+    "DHR": ("2012-01-01", "2016-07-01"),
+}
+
+
 @dataclass
 class MarketData:
     dates: pd.DatetimeIndex
@@ -81,6 +91,12 @@ def load_market_data(data_dir: str = "data", verify_hash: bool = True) -> Market
     open_ = wide("open").reindex(index=dates, columns=stock_cols)
     high = wide("high").reindex(index=dates, columns=stock_cols)
     low = wide("low").reindex(index=dates, columns=stock_cols)
+    dollar_vol = (wide("close") * wide("volume")).reindex(index=dates, columns=stock_cols)
+    for t, (a, b) in BAD_PRICES.items():
+        if t in stock_cols:
+            bad = (dates >= pd.Timestamp(a)) & (dates <= pd.Timestamp(b))
+            for panel in (close, open_, high, low):
+                panel.loc[bad, t] = np.nan
 
     # Membership panel: True on days start <= d < end (end NaT = still member).
     member = pd.DataFrame(False, index=dates, columns=stock_cols)
@@ -92,6 +108,17 @@ def load_market_data(data_dir: str = "data", verify_hash: bool = True) -> Market
         if pd.notna(e):
             in_iv &= dates < pd.Timestamp(e)
         member.loc[in_iv, sym] = True
+
+    # TICKER-REUSE SCREEN. Yahoo files prices under TODAY's owner of a ticker.
+    # When an old index member's ticker was later reused by another company
+    # (e.g. "EP": El Paso Corp until 2012, a tiny unrelated company today),
+    # we'd get the wrong company's prices. A real S&P 500 member trades tens
+    # of millions of dollars a day, so any stock whose MEDIAN dollar volume on
+    # its index-member days is < $5M is treated as bad data and never traded.
+    min_dv = 5e6
+    med_dv = dollar_vol.where(member).median()
+    reused = sorted(med_dv[med_dv < min_dv].index)
+    member.loc[:, reused] = False
 
     # No filling of missing prices: a NaN return means "no trade that day".
     rets = close.pct_change(fill_method=None)
@@ -112,6 +139,9 @@ def load_market_data(data_dir: str = "data", verify_hash: bool = True) -> Market
         # Big one-day moves are kept (clipping would be tampering with data) but
         # counted, since an adjusted-price glitch can look like one.
         "abs_daily_return_gt_50pct": int(np.nansum(np.abs(r) > 0.5)),
+        "abs_daily_return_gt_50pct_on_member_days": int(np.nansum((np.abs(r) > 0.5) & m)),
+        "blanked_bad_prices": {t: list(v) for t, v in BAD_PRICES.items()},
+        "excluded_ticker_reuse": {t: round(float(med_dv[t]) / 1e6, 2) for t in reused},
         "manifest": {k: manifest.get(k) for k in (
             "created_utc", "yfinance", "member_day_coverage", "n_index_members_in_span",
             "n_members_with_prices", "prices_sha256")},
