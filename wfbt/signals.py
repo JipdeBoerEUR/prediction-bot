@@ -49,7 +49,10 @@ _CACHE_MAX = 48
 
 def build_weights(window: np.ndarray, threshold: float) -> np.ndarray:
     """Correlation graph (mirrors sim_engine.build_adjacency_from_returns)."""
-    corr = pd.DataFrame(window).corr(min_periods=max(20, window.shape[0] // 2)).to_numpy(copy=True)
+    if np.isfinite(window).all():
+        corr = np.corrcoef(window, rowvar=False)          # fast path, no gaps
+    else:                                                 # pairwise-complete, like pandas .corr()
+        corr = pd.DataFrame(window).corr(min_periods=max(20, window.shape[0] // 2)).to_numpy(copy=True)
     corr = np.nan_to_num(corr, nan=0.0)
     np.fill_diagonal(corr, 0.0)
     W = np.where(corr >= threshold, corr, 0.0)
