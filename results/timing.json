@@ -1,0 +1,18 @@
+{
+  "period": "2016-01-04\u21922018-12-31",
+  "params": {
+    "lookback": 252,
+    "threshold": 0.45,
+    "alpha": 0.5,
+    "z_window": 60,
+    "entry_z": 2.0,
+    "exit_z": 0.5,
+    "max_hold": 10,
+    "stop_k": 3.0
+  },
+  "signal_seconds": 2.455855131149292,
+  "sim_seconds": 0.3057281970977783,
+  "total_seconds": 2.7615833282470703,
+  "n_trades": 2788,
+  "note": "timing run with default params on window-0 TRAIN data; not a result"
+}
