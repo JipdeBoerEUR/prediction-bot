@@ -1,0 +1,8 @@
+{
+  "optimisation_seconds": 201.79951453208923,
+  "deadline_hit": false,
+  "budget_min": 90.0,
+  "trials_per_window": 32,
+  "workers": 4,
+  "source": "values recorded by the 2026-09-30 17:18 UTC optimisation run (results/run.log); written by hand because that run predates this file"
+}

@@ -214,6 +214,21 @@ parameters' feature distribution and won't reflect the new thresholds.
 
 ## Backtesting
 
+### Walk-forward optimisation with out-of-sample results (`cloud-backtest` branch)
+
+**Read [`results/REPORT.md`](results/REPORT.md) before quoting any performance number.**
+Price-only (the sentiment filter is not backtested), point-in-time S&P 500 universe,
+8 rolling 3-year-train / 1-year-test windows 2019–2026, 256 Optuna trials.
+Out-of-sample result: **the strategy does not survive transaction costs**
+(−1.8%/yr at 5 bp/side; +5.9%/yr before costs). Audit notes: [`results/AUDIT.md`](results/AUDIT.md).
+
+```bash
+python -m pip install -r requirements-backtest.txt
+python run_walkforward.py --time-single   # time one backtest
+python run_walkforward.py                  # optimise + validate (resumable)
+python make_report.py                      # results/REPORT.md + charts
+```
+
 ### Walk-forward simulation of the real pipeline
 
 ```bash

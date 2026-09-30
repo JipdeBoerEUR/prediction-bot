@@ -1,1 +1,8 @@
 [OPT] window 0 (2019): {'COMPLETE': 16, 'PRUNED': 16} in 66s
+[OPT] window 3 (2022): {'COMPLETE': 25, 'PRUNED': 7} in 76s
+[OPT] window 2 (2021): {'COMPLETE': 21, 'PRUNED': 11} in 78s
+[OPT] window 1 (2020): {'COMPLETE': 27, 'PRUNED': 5} in 103s
+[OPT] window 4 (2023): {'COMPLETE': 24, 'PRUNED': 8} in 70s
+[OPT] window 5 (2024): {'COMPLETE': 27, 'PRUNED': 5} in 82s
+[OPT] window 6 (2025): {'PRUNED': 17, 'COMPLETE': 15} in 91s
+[OPT] window 7 (2026): {'COMPLETE': 27, 'PRUNED': 5} in 99s

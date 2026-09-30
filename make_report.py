@@ -96,6 +96,8 @@ def chart_windows(byw: pd.DataFrame, path: str) -> None:
     ax.set_xticks(x, [t.split("→")[0][:4] + ("*" if t.endswith("09-30") else "") for t in byw["test"]])
     _style(ax)
     ax.set_ylabel("Return in test window %", color=INK2, fontsize=9)
+    lo, hi = ax.get_ylim()
+    ax.set_ylim(lo, hi + (hi - lo) * 0.15)          # headroom so the legend clears the bars
     ax.legend(frameon=False, fontsize=8, labelcolor=INK, ncol=3, loc="upper left")
     ax.set_title("Out-of-sample return per test window (* = partial year)", fontsize=10, color=INK, loc="left")
     fig.tight_layout()
@@ -161,7 +163,7 @@ def main() -> None:
     conv = convergence(trials)
     conv.to_csv(os.path.join(OUT, "convergence.csv"), index=False)
 
-    b, st = s["oos_base"], s["oos_stress"]
+    b, st, gr = s["oos_base"], s["oos_stress"], s["oos_gross"]
     spy, ew = s["spy_buy_hold"], s["ew_universe"]
     meta, qa = s["meta"], s["data_qa"]
     man = qa.get("manifest", {}) or {}
@@ -191,10 +193,10 @@ def main() -> None:
         ptab.append(f"| {r['test']} | {f2(r['train_sharpe'])} | {int(r['train_trades'])} | {f2(r['train_dsr'])} | "
                     + " | ".join(str(r[c]) for c in pcols) + " |")
 
-    wtab = ["| Test window | Strategy base | Strategy stress | EW members | SPY | Strat. Sharpe (OOS) | Train Sharpe (IS) | Strat. MaxDD | Trades |",
-            "|---|---|---|---|---|---|---|---|---|"]
+    wtab = ["| Test window | Strategy base | Strategy stress | Zero-cost diagnostic | EW members | SPY | Strat. Sharpe (OOS) | Train Sharpe (IS) | Strat. MaxDD | Trades |",
+            "|---|---|---|---|---|---|---|---|---|---|"]
     for _, r in byw.iterrows():
-        wtab.append(f"| {r['test']} | {pct(r['strategy_base_return'])} | {pct(r['strategy_stress_return'])} | "
+        wtab.append(f"| {r['test']} | {pct(r['strategy_base_return'])} | {pct(r['strategy_stress_return'])} | {pct(r['strategy_gross_diagnostic_return'])} | "
                     f"{pct(r['ew_universe_return'])} | {pct(r['spy_buy_hold_return'])} | "
                     f"{f2(r['strategy_base_sharpe'])} | {f2(r['train_sharpe'])} | {pct(r['strategy_base_maxdd'])} | {int(r['trades'])} |")
     n_pos_w = int((byw.strategy_base_return > 0).sum())
@@ -211,7 +213,7 @@ def main() -> None:
     ctab = ["| Test year | Trials | Pruned | Best IS Sharpe after half the trials | Best IS Sharpe final | Last improvement at trial # |",
             "|---|---|---|---|---|---|"]
     for _, r in conv.iterrows():
-        ctab.append(f"| {r.test_year} | {r.trials} | {r.pruned} | {f2(r.best_at_half)} | {f2(r.best_final)} | {r.last_improvement_at_trial} |")
+        ctab.append(f"| {int(r.test_year)} | {int(r.trials)} | {int(r.pruned)} | {f2(r.best_at_half)} | {f2(r.best_final)} | {int(r.last_improvement_at_trial)} |")
 
     tc = s["trial_counts"]
     reasons = ", ".join(f"{k} {v:,}" for k, v in (b.get("exit_reasons") or {}).items())
@@ -233,6 +235,7 @@ def main() -> None:
 |---|---|---|---|---|---|---|---|
 {perf_row("Strategy — base costs", b)}
 {perf_row("Strategy — stress costs", st)}
+{perf_row("_Diagnostic: same trades, zero costs_", gr)}
 {perf_row("Benchmark: equal-weight S&P 500 members (same universe)", ew)}
 {perf_row("Benchmark: SPY buy & hold", spy)}
 
@@ -275,7 +278,19 @@ traded on days it was an index member. {man.get('n_index_members_in_span', '?')}
 some point in the span; {man.get('n_members_with_prices', '?')} have Yahoo prices; **member-day coverage
 {pctu(man.get('member_day_coverage') or float('nan'))}** — the missing rest are mostly
 delisted/acquired companies. On average {qa.get('avg_members_with_price_per_day', float('nan')):.0f} members
-with prices per day. Days with |return| > 50% (kept, not clipped): {qa.get('abs_daily_return_gt_50pct')}.
+with prices per day.
+
+*Data cleaning (every step listed):* (1) **ticker-reuse screen** — Yahoo files
+prices under today's owner of a ticker, so some old index tickers show a
+different company (e.g. "EP" = El Paso Corp until 2012, a tiny firm today).
+Stocks with median dollar volume < $5M on their index-member days are never
+traded: {', '.join(f"{k} (${v}M)" for k, v in (qa.get('excluded_ticker_reuse') or {}).items())}.
+(2) **DHR** prices before the 2016 Fortive spin-off are blanked (Yahoo's adjusted
+history is mis-scaled, creating a fake +61% day). (3) Every remaining
+|daily return| > 50% on a member day ({qa.get('abs_daily_return_gt_50pct_on_member_days')}) was checked:
+all came with heavy trading volume, and most match known events (PG&E 2019,
+the March 2020 oil crash, Globe Life 2024); Moderna 2026-08-19 is confirmed by
+volume (~40× normal) only. All were **kept** — no clipping. Nothing else was modified.
 SHA-256 of prices.parquet: `{man.get('prices_sha256', '?')}`.
 
 **Costs** (every fill, per side, plus a borrow fee on shorts):
@@ -287,7 +302,9 @@ SHA-256 of prices.parquet: `{man.get('prices_sha256', '?')}`.
 
 Parameters were optimised under **base** costs only; the stress run re-trades the
 same chosen parameters with higher costs. Cash earns 0% (no T-bill data), which
-also means Sharpe uses a 0% risk-free rate.
+also means Sharpe uses a 0% risk-free rate. The "zero costs" row is a **diagnostic
+only** (same parameters and signals, no costs) showing how much gross edge the
+costs consume — it is not an achievable result.
 
 **Walk-forward.** {s['windows']} windows: train 3 calendar years → test the next
 year (2026 = Jan–Sep). Parameters re-chosen each window; positions carry over at
@@ -347,7 +364,9 @@ selection effect; < 0.95 = the in-sample "best" is not statistically convincing)
 
 For each window, every parameter was moved one grid step up/down (one at a time)
 and re-traded on the same test window. A real edge should survive small changes;
-a lone spike surrounded by bad neighbours is overfitting.
+a lone spike surrounded by bad neighbours is overfitting. (These runs start each
+test window with no positions, so "chosen" can differ slightly from section 4,
+where positions carry over between windows.)
 
 {chr(10).join(ntab)}
 

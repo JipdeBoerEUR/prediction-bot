@@ -62,7 +62,11 @@ from scipy import stats  # noqa: E402
 from wfbt import metrics as M  # noqa: E402
 from wfbt.data import MarketData, load_market_data  # noqa: E402
 from wfbt.signals import zscore_panel  # noqa: E402
-from wfbt.sim import BASE_COSTS, STRESS_COSTS, Params, Segment, simulate  # noqa: E402
+from wfbt.sim import BASE_COSTS, STRESS_COSTS, Costs, Params, Segment, simulate  # noqa: E402
+
+# DIAGNOSTIC ONLY: the same chosen parameters re-traded with zero costs, to
+# show how much of any gross edge the costs eat. Never used to choose anything.
+ZERO_COSTS = Costs(0.0, 0.0, 0.0)
 
 SEED = 42
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -272,7 +276,8 @@ def evaluate(md: MarketData, workers: int, meta: dict) -> None:
 
     # ── Stitched out-of-sample run, two cost levels ─────────────────────────
     t0 = time.time()
-    oos = {name: simulate(md, segs, c) for name, c in (("base", BASE_COSTS), ("stress", STRESS_COSTS))}
+    oos = {name: simulate(md, segs, c) for name, c in (("base", BASE_COSTS), ("stress", STRESS_COSTS),
+                                                       ("gross", ZERO_COSTS))}
     meta["oos_sim_seconds"] = time.time() - t0
     s0, s1 = segs[0].start, segs[-1].end
     cap = 100_000.0
@@ -280,6 +285,7 @@ def evaluate(md: MarketData, workers: int, meta: dict) -> None:
     ew = ew_universe_equity(md, s0, s1, cap)
     daily = pd.DataFrame({
         "strategy_base": oos["base"].equity, "strategy_stress": oos["stress"].equity,
+        "strategy_gross_diagnostic": oos["gross"].equity,
         "spy_buy_hold": spy, "ew_universe": ew,
         "gross_exposure": oos["base"].gross_exposure, "net_exposure": oos["base"].net_exposure,
     })
@@ -294,7 +300,7 @@ def evaluate(md: MarketData, workers: int, meta: dict) -> None:
         # From the previous close (so the first test day's return counts) to the last test day.
         first = max(sg.start - 1, s0) - s0
         rowsub = {"window": w["window"], "test": w["test"], "train_sharpe": w["train_sharpe"]}
-        for col in ("strategy_base", "strategy_stress", "spy_buy_hold", "ew_universe"):
+        for col in ("strategy_base", "strategy_stress", "strategy_gross_diagnostic", "spy_buy_hold", "ew_universe"):
             m = M.perf(daily[col].iloc[first:sg.end - s0 + 1])
             rowsub[f"{col}_return"] = m.get("total_return")
             rowsub[f"{col}_sharpe"] = m.get("sharpe")
@@ -324,7 +330,8 @@ def evaluate(md: MarketData, workers: int, meta: dict) -> None:
     summary = {"meta": meta, "data_qa": md.qa, "trial_counts": total,
                "total_trials": int(sum(total.values())), "windows": len(TEST_PERIODS),
                "windows_evaluated": len(segs),
-               "costs": {"base": BASE_COSTS.__dict__, "stress": STRESS_COSTS.__dict__}}
+               "costs": {"base": BASE_COSTS.__dict__, "stress": STRESS_COSTS.__dict__,
+                         "gross_diagnostic": ZERO_COSTS.__dict__}}
     for name, res in oos.items():
         eq = res.equity
         summary[f"oos_{name}"] = {
@@ -395,8 +402,16 @@ def main() -> None:
         jobs = [(k, a.trials_per_window, deadline) for k in range(len(TEST_PERIODS))]
         with mp.get_context("fork").Pool(a.workers) as pool:
             pool.map(optimise_window, jobs, chunksize=1)
-        meta["optimisation_seconds"] = time.time() - t0
-        meta["deadline_hit"] = time.time() >= deadline
+        opt_meta = {"optimisation_seconds": time.time() - t0, "deadline_hit": time.time() >= deadline,
+                    "budget_min": a.budget_min, "trials_per_window": a.trials_per_window,
+                    "workers": a.workers}
+        with open(os.path.join(OUT, "optimisation_meta.json"), "w") as f:
+            json.dump(opt_meta, f, indent=2)
+    # --eval-only keeps the timing/budget of the run that actually optimised.
+    opt_path = os.path.join(OUT, "optimisation_meta.json")
+    if os.path.exists(opt_path):
+        with open(opt_path) as f:
+            meta.update(json.load(f))
     evaluate(md, a.workers, meta)
 
 
