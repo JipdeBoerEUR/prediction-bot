@@ -19,7 +19,7 @@ trade_history.csv
 bot_positions.json
 statarb/config.py
 stop.txt
-data/
+data/*
 logs/
 
 # Backtest cache + generated reports
@@ -38,3 +38,11 @@ _extract_phase3_bounds.py
 
 # Backtest deliverables are committed (override the global *.csv ignore)
 !results/*.csv
+# Backtest input data is committed so results are reproducible
+# (the per-symbol download cache data/_raw/ stays ignored)
+!data/prices.parquet
+!data/membership.parquet
+!data/sp500_membership_raw.csv
+!data/download_log.csv
+!data/download_manifest.json
+!results/**/*.csv
