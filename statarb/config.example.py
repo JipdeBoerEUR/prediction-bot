@@ -154,7 +154,12 @@ ENGINES = {
         # fetches interval="1d" for this regardless of INTERVAL below).
         "start":        "2023-01-01",
         "end":          None,
-        # Live statarb exit threshold (main.py run_statarb_exits).
+        # Live statarb exit threshold (main.py run_statarb_exits), in z-score
+        # units — the same units as entry_z. Exit when z is back within
+        # ±exit_z of zero on the entry side.
+        "exit_z":       EXIT_Z,
+        # Legacy raw-residual threshold, only read by the retired
+        # statarb/runner.py and the legacy backtest.py event study.
         "sell_thresh":  SELL_THRESH,
         # Historical dataset-builder settings (statarb/dataset_builder_v2.py).
         "interval":       INTERVAL,

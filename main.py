@@ -54,7 +54,7 @@ from news_scanner       import scan_news
 from notifier           import send_trade_alert, send_statarb_alert
 from logger             import log_evaluation
 from portfolio_monitor  import evaluate_portfolio, monitor_live_positions
-from trade_utils        import is_sell_side, vol_scaled_stop_pct
+from trade_utils        import is_sell_side, statarb_signal_exit, vol_scaled_stop_pct
 from position_ledger    import record_position, remove_position, load_ledger as load_position_ledger
 
 # Retired → kept on disk for reference:
@@ -1263,15 +1263,20 @@ def run_statarb_exits(ctx: OrchestratorContext) -> None:
     Signal-based stat-arb exit pass (runs every 30 min, independent of the main scan).
 
     For every held position that appears in the equities universe, checks whether
-    the current diffusion residual has turned positive (mean-reversion complete).
-    If so, submits a market SELL order directly — bypassing the AI audit gates
-    since it is a closing, not an opening, trade.
+    the residual z-score has reverted to within EXIT_Z of zero (mean-reversion
+    complete). If so, submits a market order to close it — bypassing the AI
+    audit gates since it is a closing, not an opening, trade.
+
+    Units: entries are gated on |z| >= ENTRY_Z (z-score units), so the exit is
+    also in z-score units via trade_utils.statarb_signal_exit. The previous
+    version compared the RAW residual against SELL_THRESH (0.03 = a 3% daily
+    return), a unit mismatch that almost never fired.
     """
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"\n[STATARB-EXIT] Running exit pass ({ts})…")
 
     eng = cfg.ENGINES.get("equities", {})
-    sell_thresh = float(eng.get("sell_thresh", getattr(cfg, "SELL_THRESH", 0.01)))
+    exit_z = float(eng.get("exit_z", getattr(cfg, "EXIT_Z", 0.30)))
 
     # Current held positions from Alpaca
     try:
@@ -1292,7 +1297,7 @@ def run_statarb_exits(ctx: OrchestratorContext) -> None:
         print(f"[STATARB-EXIT] SignalEngine failed: {e}. Skipping.")
         return
 
-    residuals = dict(zip(signals_df["Ticker"], signals_df["Residual"], strict=False))
+    residual_zs = dict(zip(signals_df["Ticker"], signals_df["Residual_Z"], strict=False))
 
     # Only touch positions the statarb strategy itself opened. A positive
     # residual means "outperforming peers" — for a topic-momentum long that is
@@ -1306,18 +1311,18 @@ def run_statarb_exits(ctx: OrchestratorContext) -> None:
         meta = ledger.get(ticker)
         if not isinstance(meta, dict) or meta.get("source") != "statarb":
             continue
-        residual = residuals.get(ticker)
-        if residual is None:
+        z = residual_zs.get(ticker)
+        if z is None:
             continue    # not in universe — leave to the SL/TP monitor
-        if qty > 0 and residual > sell_thresh:
-            print(f"[STATARB-EXIT] {ticker}: residual={residual:.4f} > "
-                  f"{sell_thresh:.4f} → closing LONG {qty}")
+        if qty > 0 and statarb_signal_exit(1, float(z), exit_z):
+            print(f"[STATARB-EXIT] {ticker}: z={z:+.2f} >= -{exit_z:.2f} "
+                  f"→ closing LONG {qty}")
             exit_rows.append({"ticker": ticker, "side": "SELL", "Qty": qty})
-        elif qty < 0 and residual < -sell_thresh:
+        elif qty < 0 and statarb_signal_exit(-1, float(z), exit_z):
             # Short book: entered rich vs peers; reversion is complete once
-            # the residual swings negative → BUY to cover.
-            print(f"[STATARB-EXIT] {ticker}: residual={residual:.4f} < "
-                  f"-{sell_thresh:.4f} → covering SHORT {abs(qty)}")
+            # z has come back to within exit_z of zero → BUY to cover.
+            print(f"[STATARB-EXIT] {ticker}: z={z:+.2f} <= +{exit_z:.2f} "
+                  f"→ covering SHORT {abs(qty)}")
             exit_rows.append({"ticker": ticker, "side": "BUY", "Qty": abs(qty)})
 
     if not exit_rows:

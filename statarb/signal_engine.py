@@ -100,7 +100,8 @@ class SignalEngine:
               - Actual_Return
               - Expected_Return
               - Residual
-              - Signal_Strength
+              - Residual_Z       (signed z-score; NaN if use_zscore_strength=False)
+              - Signal_Strength  (|Residual_Z|, or |Residual| if z disabled)
             Sorted by Residual ascending (most negative first => BUY side).
         """
         if not (0 < alpha < 1):
@@ -188,8 +189,12 @@ class SignalEngine:
                     except (np.linalg.LinAlgError, ValueError):
                         pass
             sig_std = float(np.std(hist_resids)) if len(hist_resids) >= 2 else float(np.std(residuals))
-            strength = np.abs(residuals / sig_std) if sig_std > 1e-12 else np.zeros_like(residuals)
+            # Signed z-score: negative = under-performed peers (long side).
+            # Exits need the sign, not just |z|, so it is returned separately.
+            residual_z = residuals / sig_std if sig_std > 1e-12 else np.zeros_like(residuals)
+            strength = np.abs(residual_z)
         else:
+            residual_z = np.full_like(residuals, np.nan)
             strength = np.abs(residuals)
 
         df = pd.DataFrame(
@@ -198,6 +203,7 @@ class SignalEngine:
                 "Actual_Return": x,
                 "Expected_Return": h,
                 "Residual": residuals,
+                "Residual_Z": residual_z,
                 "Signal_Strength": strength,
             }
         ).sort_values("Residual", ascending=True).reset_index(drop=True)

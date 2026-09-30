@@ -125,6 +125,34 @@ def check_position_exit(
     return None, new_extreme
 
 
+def statarb_signal_exit(side: int, residual_z: Optional[float], exit_z: float) -> bool:
+    """Mean-reversion exit rule for a stat-arb position, in Z-SCORE units.
+
+    Entries fire when the residual z-score is stretched beyond ±ENTRY_Z
+    (long when z <= -ENTRY_Z, short when z >= +ENTRY_Z). The exit must be
+    measured in the SAME units: the trade is "done" once z has come back to
+    within exit_z of zero on the entry side.
+
+        long  (+1): exit when z >= -exit_z   (e.g. -2.1 → -0.25 with exit_z=0.3)
+        short (-1): exit when z <= +exit_z
+
+    Previously the live exit compared the RAW residual (a daily return, e.g.
+    0.004) against SELL_THRESH=0.03 — a different unit from the z-score entry,
+    and a threshold that required a +3% daily out-performance overshoot before
+    ever closing. Both the live monitor and the walk-forward backtester now
+    call this one function so they cannot drift apart again.
+
+    Missing / non-finite z → False (never force an exit on bad data).
+    """
+    if residual_z is None or not math.isfinite(residual_z):
+        return False
+    if side == 1:
+        return residual_z >= -exit_z
+    if side == -1:
+        return residual_z <= exit_z
+    return False
+
+
 def trading_days_since(opened_at_iso: str, today: Optional[date] = None) -> int:
     """Count Mon-Fri days strictly after `opened_at_iso` (YYYY-MM-DD) up to today.
 

@@ -1,0 +1,23 @@
+# requirements-backtest.txt
+# ---------------------------------------------------------------------------
+# Minimal, EXACTLY pinned environment for the walk-forward backtest and the
+# parameter optimisation (cloud-backtest branch). Deliberately excludes the
+# live-trading / NLP stack (torch, transformers, BERTopic, chromadb, alpaca):
+# the backtest does not import any of it, and a smaller pinned set is what
+# makes a result reproducible months later.
+#
+#   python -m pip install -r requirements-backtest.txt      (Python 3.11)
+# ---------------------------------------------------------------------------
+numpy==2.4.3
+pandas==3.0.1
+scipy==1.17.1
+pyarrow==25.0.1          # parquet price cache in bt_cache/
+yfinance==1.2.0          # price source (needs network access to *.yahoo.com)
+curl_cffi==0.13.0        # yfinance HTTP backend
+matplotlib==3.10.8       # equity / drawdown charts
+optuna==5.0.0            # TPE search with pruning
+SQLAlchemy==2.1.1        # optuna's on-disk study storage (checkpointing)
+alembic==1.20.0
+joblib==1.5.3
+pytest==9.1.1
+ruff==0.16.9

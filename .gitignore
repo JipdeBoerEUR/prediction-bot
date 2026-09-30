@@ -35,3 +35,6 @@ _analyze_trials.py
 _check_best.py
 _check_latest.py
 _extract_phase3_bounds.py
+
+# Backtest deliverables are committed (override the global *.csv ignore)
+!results/*.csv

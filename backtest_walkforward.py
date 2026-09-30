@@ -30,7 +30,13 @@ Honest limitations (read before quoting numbers)
 * The live graph applies a same-sector edge mask (fetched from yfinance);
   historical sector membership isn't point-in-time available, so the backtest
   uses the unmasked correlation graph.
-* Costs are a flat per-side bps haircut; no market impact or borrow fees.
+* Costs: commission + slippage (half-spread + impact) in bps per side, plus
+  an annual short-borrow fee accrued daily on short notional. No explicit
+  market-impact model beyond the flat slippage haircut.
+* Survivorship: the universe is a list of TODAY's large caps. Names that were
+  delisted / acquired / dropped from the index before today are missing, and
+  names that only became large caps later (e.g. PLTR) are present from their
+  IPO. This biases a long-biased strategy upward — see results/AUDIT.md.
 * Daily bars: stops are checked against each bar's High/Low with pessimistic
   (stop-first) ordering and gap-open fills, but intrabar path is unknowable.
 
@@ -56,7 +62,11 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from statarb.sim_engine import solve_diffusion_residual          # noqa: E402
-from trade_utils import check_position_exit, vol_scaled_stop_pct  # noqa: E402
+from trade_utils import (  # noqa: E402
+    check_position_exit,
+    statarb_signal_exit,
+    vol_scaled_stop_pct,
+)
 
 # ── Universe ─────────────────────────────────────────────────────────────────
 # statarb/config.py is git-ignored (holds API keys), so fall back to a liquid
@@ -129,13 +139,14 @@ def load_data(tickers: List[str], start: str, end: str, cache_dir: str):
         raise SystemExit("No price data could be fetched — aborting.")
 
     close = pd.DataFrame({t: f["Close"] for t, f in frames.items()}).sort_index()
-    # Drop names with poor coverage — they distort the correlation graph.
-    coverage = close.notna().mean()
-    keep = coverage[coverage >= 0.70].index.tolist()
-    dropped = sorted(set(close.columns) - set(keep))
-    if dropped:
-        print(f"[DATA] Dropping {len(dropped)} low-coverage tickers: {dropped}")
-    close = close[keep]
+    # NO full-period coverage filter. The old filter kept only names with data
+    # on >=70% of ALL days in the span — a decision made using information from
+    # the END of the backtest (did this stock still exist / was it listed early
+    # enough?), i.e. look-ahead + survivorship bias. Missing data is instead
+    # handled point-in-time: the graph window drops names with too little
+    # history *in that window*, and each day only names with a return that day
+    # get a residual.
+    keep = close.columns.tolist()
     open_ = pd.DataFrame({t: frames[t]["Open"] for t in keep}).reindex(close.index)
     high  = pd.DataFrame({t: frames[t]["High"] for t in keep}).reindex(close.index)
     low   = pd.DataFrame({t: frames[t]["Low"]  for t in keep}).reindex(close.index)
@@ -232,7 +243,12 @@ def run_backtest(a) -> dict:
     exposure_curve = pd.Series(index=dates[first_sim:], dtype=float)
     trades: List[dict] = []
     fills_notional = 0.0
-    cost_rate = a.cost_bps / 10_000.0
+    # Per-side cost as a fraction of traded notional: commission + slippage.
+    # Slippage stands in for half the bid-ask spread plus a little impact.
+    cost_rate = (a.commission_bps + a.slippage_bps) / 10_000.0
+    # Short-borrow fee: annual bps on short notional, accrued each trading day.
+    borrow_daily = a.borrow_bps / 10_000.0 / 252.0
+    costs_paid = {"trading": 0.0, "borrow": 0.0}
 
     def _fill_exit(t_idx: int, ticker: str, price: float, reason: str):
         nonlocal cash, fills_notional
@@ -240,6 +256,7 @@ def run_backtest(a) -> dict:
         notional = pos.qty * price
         cash += pos.side * notional          # long sale adds cash; short cover subtracts
         cash -= notional * cost_rate
+        costs_paid["trading"] += notional * cost_rate
         fills_notional += notional
         pnl = (price / pos.entry - 1.0) * pos.side
         trades.append({
@@ -272,9 +289,13 @@ def run_backtest(a) -> dict:
 
         # ── 1. Fill queued exits at today's open ─────────────────────────────
         for ticker, reason in list(pending_exits.items()):
-            if ticker in positions and np.isfinite(open_t.get(ticker, np.nan)):
+            if ticker not in positions:
+                pending_exits.pop(ticker, None)
+            elif np.isfinite(open_t.get(ticker, np.nan)):
                 _fill_exit(t, ticker, float(open_t[ticker]), reason)
-            pending_exits.pop(ticker, None)
+                pending_exits.pop(ticker, None)
+            # else: no price today (halt / data gap) → keep the exit queued
+            # for the next bar instead of silently forgetting it.
 
         # ── 2. Fill queued entries at today's open ───────────────────────────
         for order in pending_entries:
@@ -299,6 +320,7 @@ def run_backtest(a) -> dict:
                                          stop_pct, trail_pct, fixed_tp)
             cash -= order["side"] * qty * px
             cash -= qty * px * cost_rate
+            costs_paid["trading"] += qty * px * cost_rate
             fills_notional += qty * px
         pending_entries = []
 
@@ -348,12 +370,9 @@ def run_backtest(a) -> dict:
 
         # ── 5. Queue signal exits (residual reverted / max-hold) ─────────────
         for ticker, pos in positions.items():
-            z = z_now.get(ticker)
-            if z is not None:
-                if pos.side == 1 and z >= -a.exit_z:
-                    pending_exits[ticker] = "RESIDUAL_REVERTED"
-                elif pos.side == -1 and z <= a.exit_z:
-                    pending_exits[ticker] = "RESIDUAL_REVERTED"
+            # Same z-units rule the live monitor uses (trade_utils).
+            if statarb_signal_exit(pos.side, z_now.get(ticker), a.exit_z):
+                pending_exits[ticker] = "RESIDUAL_REVERTED"
             if t - pos.opened_idx >= a.max_hold and ticker not in pending_exits:
                 pending_exits[ticker] = "MAX_HOLD"
 
@@ -385,6 +404,10 @@ def run_backtest(a) -> dict:
             px = float(px) if np.isfinite(px) else pos.entry
             pos_value += pos.side * pos.qty * px
             gross += pos.qty * px
+            if pos.side == -1:
+                fee = pos.qty * px * borrow_daily
+                cash -= fee
+                costs_paid["borrow"] += fee
         equity = cash + pos_value
         equity_curve.iloc[rel_day] = equity
         exposure_curve.iloc[rel_day] = gross / equity if equity > 0 else 0.0
@@ -396,7 +419,7 @@ def run_backtest(a) -> dict:
     return {
         "equity": equity_curve, "spy": spy_bench, "trades": trades,
         "exposure": exposure_curve.reindex(equity_curve.index),
-        "fills_notional": fills_notional, "args": a,
+        "fills_notional": fills_notional, "costs_paid": costs_paid, "args": a,
     }
 
 
@@ -482,6 +505,8 @@ def write_report(result: dict, prefix: str) -> None:
         "",
         *trade_lines,
         f"- Avg gross exposure: {avg_exp:.0%} of equity  |  Annual turnover: {turnover:.1f}×",
+        f"- Costs paid: trading ${result['costs_paid']['trading']:,.0f}  |  "
+        f"short borrow ${result['costs_paid']['borrow']:,.0f}",
         "",
         "## Configuration",
         "",
@@ -489,12 +514,14 @@ def write_report(result: dict, prefix: str) -> None:
         f"graph_threshold={a.graph_threshold} lookback={a.lookback}d "
         f"rebuild_every={a.rebuild_every}d z_window={a.z_window} "
         f"max_positions={a.max_positions} max_weight={a.max_weight} "
-        f"max_hold={a.max_hold}d cost_bps={a.cost_bps} capital={a.capital}\n```",
+        f"max_hold={a.max_hold}d commission_bps={a.commission_bps} "
+        f"slippage_bps={a.slippage_bps} borrow_bps={a.borrow_bps} capital={a.capital}\n```",
         "",
         "## Limitations",
         "",
         "- Topic (news momentum) sleeve **not** simulated — no historical headline archive exists.",
-        "- No same-sector edge mask (live graph uses one); no borrow fees or market impact.",
+        "- No same-sector edge mask (live graph uses one); flat slippage, no explicit impact model.",
+        "- Universe = today's large caps → survivorship bias (see results/AUDIT.md).",
         "- Signals fire at close t, fill at open t+1; stops are intraday vs High/Low with",
         "  pessimistic stop-first ordering and gap-open fills.",
         "",
@@ -554,7 +581,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-weight", type=float, default=0.20, dest="max_weight")
     p.add_argument("--max-hold", type=int, default=15, dest="max_hold",
                    help="Max holding period (trading days)")
-    p.add_argument("--cost-bps", type=float, default=5.0, dest="cost_bps")
+    # Cost model (all per side, in basis points of traded notional):
+    #   commission ~1 bp  — IBKR-style tiered pricing on large caps
+    #   slippage   ~4 bp  — half of a ~2-5 bp quoted spread plus a little impact
+    #                       for small orders in S&P 500 names at the open
+    #   borrow     50 bp/yr — typical general-collateral fee for easy-to-borrow
+    #                       large caps (hard-to-borrow names cost far more)
+    p.add_argument("--commission-bps", type=float, default=1.0, dest="commission_bps")
+    p.add_argument("--slippage-bps", type=float, default=4.0, dest="slippage_bps")
+    p.add_argument("--borrow-bps", type=float, default=50.0, dest="borrow_bps",
+                   help="Annual short-borrow fee in bps of short notional")
     p.add_argument("--exits", choices=["vol", "fixed"], default="vol",
                    help="vol = σ-scaled trailing stops; fixed = legacy -7%%/+15%%")
     p.add_argument("--dollar-neutral", action="store_true", dest="dollar_neutral")

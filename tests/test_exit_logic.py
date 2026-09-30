@@ -151,3 +151,38 @@ def test_two_full_weeks():
 def test_garbage_input_is_zero():
     assert trading_days_since("not-a-date") == 0
     assert trading_days_since("") == 0
+
+
+# ── statarb_signal_exit (z-score units, shared by live + backtest) ───────────
+
+from trade_utils import statarb_signal_exit  # noqa: E402
+
+
+def test_long_exits_once_z_reverts_within_band():
+    # Entered at z <= -1.75; exit_z=0.30 → close once z >= -0.30.
+    assert statarb_signal_exit(1, -0.25, 0.30) is True
+    assert statarb_signal_exit(1, -0.30, 0.30) is True
+    assert statarb_signal_exit(1, 0.80, 0.30) is True     # overshoot also exits
+
+
+def test_long_holds_while_still_stretched():
+    assert statarb_signal_exit(1, -1.20, 0.30) is False
+
+
+def test_short_is_mirror_image():
+    assert statarb_signal_exit(-1, 0.25, 0.30) is True
+    assert statarb_signal_exit(-1, -0.50, 0.30) is True
+    assert statarb_signal_exit(-1, 1.20, 0.30) is False
+
+
+def test_exit_uses_z_units_not_raw_residuals():
+    # Regression for the old unit mismatch: a raw residual of +0.004 (0.4%
+    # daily) would never have cleared SELL_THRESH=0.03. In z-units, a long
+    # entered at z=-2 that is now at z=-0.1 has clearly reverted.
+    assert statarb_signal_exit(1, -0.1, 0.30) is True
+
+
+def test_missing_z_never_forces_exit():
+    assert statarb_signal_exit(1, None, 0.30) is False
+    assert statarb_signal_exit(-1, float("nan"), 0.30) is False
+    assert statarb_signal_exit(0, -0.1, 0.30) is False
