@@ -151,3 +151,30 @@ Severity: 🔴 invalidates headline numbers · 🟠 materially biases numbers ·
   split into commission, slippage and borrow; queued exits kept; shared exit rule.
 - `tests/test_exit_logic.py`: 5 new tests for the exit rule.
 - `requirements-backtest.txt`: exactly pinned minimal backtest environment.
+
+---
+
+## 6. Update: decisions and the new engine (Steps 1–2 prep)
+
+Your decisions: prices downloaded locally with `download_data.py`; scope is
+**price-only** (sentiment reported as not backtested); point-in-time S&P 500
+membership from `fja05680/sp500`; **4-hour hard budget**, Optuna with pruning,
+~256 trials (8 windows × 32), checkpointed.
+
+The walk-forward optimisation needs hundreds of backtests, so the maths was
+moved into a fast, tested package `wfbt/` (`run_walkforward.py` and
+`make_report.py` drive it). Differences from `backtest_walkforward.py`, all
+deliberate:
+
+- **Point-in-time universe.** Only index members on that day can be linked in
+  the graph or traded (fixes B1 partially).
+- **E2 fixed.** The z-score compares today's residual with the *previous*
+  `z_window` residuals only.
+- **Long/short book** (5 long + 5 short, 10% each). This is real stat-arb, and
+  it exercises the borrow-cost model. The old default was 5 longs at 20%.
+- **Same maths, faster.** Graph residuals use one LU factorisation per graph
+  rebuild instead of one solve per day. `tests/test_wfbt.py` proves the result
+  is identical to the production solver `statarb.sim_engine`. It also proves
+  that changing future prices does not change past signals (no look-ahead).
+- Same exit functions as live (`trade_utils.check_position_exit`,
+  `statarb_signal_exit`).
