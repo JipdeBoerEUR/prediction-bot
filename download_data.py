@@ -97,6 +97,8 @@ RENAMES: Dict[str, List[str]] = {
     "ADS":   ["BFH"],    # Alliance Data → Bread Financial (2022)
     "GPS":   ["GAP"],    # Gap Inc (2024)
     "FI":    ["FISV", "FI"],   # Fiserv changed FISV→FI (2023) and back (2025)
+    "BK":    ["BNY"],    # Bank of New York Mellon → BNY (2026; Yahoo has full history under BNY)
+    "MMC":   ["MRSH"],   # Marsh & McLennan → MRSH (2026; full history under MRSH)
     "FISV":  ["FISV", "FI"],
 }
 
